@@ -1,0 +1,131 @@
+"""Connectivity probes for ``POST /config`` save-time validation (spec §7.1).
+
+Three probes, run in order; if any fails, the form is rejected and no
+config is persisted:
+
+1. BlueWeb HEAD (HTTP reachability)
+2. MySQL ``SELECT 1`` + charset/collation check (§3 / §10/M2)
+3. Selenium login round-trip (catches wrong creds / changed selectors)
+
+Probes return ``ProbeResult`` so callers (form save, ``Test BlueWeb`` /
+``Test MySQL`` buttons) can render a clear status without seeing the
+raw exception.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional
+
+import pymysql
+import urllib.error
+import urllib.request
+
+from .config import Config
+from .db import MysqlConfig, connect
+from .driver import SafeDriver, build_driver
+from .exceptions import AuthFailed, RunFailure
+from .login import login_and_navigate
+
+
+@dataclass(frozen=True)
+class ProbeResult:
+    ok: bool
+    detail: str
+
+
+def probe_blueweb_http(cfg: Config, timeout_s: float = 5.0) -> ProbeResult:
+    """HEAD the configured URL. Failure → ``ok=False`` with the error name."""
+    try:
+        req = urllib.request.Request(cfg.blueweb_url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            code = resp.getcode()
+        if code >= 500:
+            return ProbeResult(False, f"HTTP {code} from BlueWeb")
+        return ProbeResult(True, f"HEAD {code}")
+    except urllib.error.URLError as e:
+        return ProbeResult(False, f"unreachable: {e.reason}")
+    except Exception as e:  # pragma: no cover — defensive
+        return ProbeResult(False, f"{type(e).__name__}: {e}")
+
+
+def probe_mysql(cfg: Config) -> ProbeResult:
+    """``SELECT 1`` + charset/collation sanity check on the audit DB."""
+    try:
+        with connect(
+            MysqlConfig(
+                host=cfg.mysql_host,
+                port=cfg.mysql_port,
+                user=cfg.mysql_user,
+                password=cfg.mysql_password,
+                database=cfg.mysql_database,
+            )
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 AS ok")
+                cur.fetchone()
+                cur.execute(
+                    "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME "
+                    "FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = %s",
+                    (cfg.mysql_database,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return ProbeResult(False, f"database {cfg.mysql_database!r} not visible")
+        # DictCursor — keys uppercased.
+        cs = row.get("DEFAULT_CHARACTER_SET_NAME")
+        co = row.get("DEFAULT_COLLATION_NAME")
+        if cs != "utf8mb4":
+            return ProbeResult(
+                False,
+                f"database charset {cs!r}, expected 'utf8mb4' "
+                f"(spec L20 — legacy `utf8` truncates 4-byte chars)",
+            )
+        if co != "utf8mb4_unicode_ci":
+            return ProbeResult(
+                False, f"database collation {co!r}, expected 'utf8mb4_unicode_ci'"
+            )
+        return ProbeResult(True, "SELECT 1 OK, charset/collation OK")
+    except pymysql.err.Error as e:
+        return ProbeResult(False, f"{type(e).__name__}: {e}")
+
+
+def probe_bluewave_login(cfg: Config) -> ProbeResult:
+    """Spin a one-shot headless Chromium and run S1+S2.
+
+    Slow (~10–20 s) but catches the cases other probes can't: wrong creds,
+    BlueWeb returning a different login form after an upgrade, selectors
+    drifting.
+    """
+    try:
+        with build_driver() as raw:
+            safe = SafeDriver(raw)
+            login_and_navigate(
+                safe, cfg.blueweb_url, cfg.blueweb_user, cfg.blueweb_password,
+                login_wait_s=20, nav_wait_s=10,
+            )
+    except AuthFailed as e:
+        return ProbeResult(False, f"auth_failed: {e}")
+    except RunFailure as e:
+        return ProbeResult(False, f"{e.status}: {e}")
+    except Exception as e:  # pragma: no cover — defensive
+        return ProbeResult(False, f"{type(e).__name__}: {e}")
+    return ProbeResult(True, "login + Reports navigation OK")
+
+
+def triple_probe(cfg: Config) -> tuple[bool, list[tuple[str, ProbeResult]]]:
+    """Run all three probes in order. Short-circuit on the first failure
+    so the operator sees one clear error, not a stack of them.
+
+    Returns ``(overall_ok, [(name, ProbeResult), ...])``.
+    """
+    results: list[tuple[str, ProbeResult]] = []
+    for name, fn in [
+        ("blueweb_http", probe_blueweb_http),
+        ("mysql",        probe_mysql),
+        ("bluewave_login", probe_bluewave_login),
+    ]:
+        r = fn(cfg)
+        results.append((name, r))
+        if not r.ok:
+            return False, results
+    return True, results

@@ -1,0 +1,25 @@
+# Runtime deps. Pinned per spec §4.3 (refresh quarterly).
+
+# M1 ------------------------------------------------------------------
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+cryptography==43.0.0
+bcrypt==4.2.0
+
+# M2 ------------------------------------------------------------------
+PyMySQL==1.1.1
+
+# M3 ------------------------------------------------------------------
+selenium==4.25.0
+
+# M5 ------------------------------------------------------------------
+# IANA tzdata fallback for hosts without system tz files (Windows dev).
+# The container gets the same data via apt tzdata.
+tzdata==2024.2
+
+# M7 ------------------------------------------------------------------
+itsdangerous==2.2.0
+python-multipart==0.0.12
+
+# M8 ------------------------------------------------------------------
+APScheduler==3.10.4
