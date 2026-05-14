@@ -141,6 +141,50 @@ class BootstrapResult:
 # ---------------------------------------------------------------------------
 
 
+import re as _re
+
+# Integer types whose display width MariaDB / MySQL <= 8.0.16 emits in
+# information_schema.COLUMN_TYPE (e.g. ``bigint(20) unsigned``). MySQL 8.0.19+
+# drops the width. We strip it for comparison purposes.
+_INT_TYPES_WITH_WIDTH = (
+    "tinyint", "smallint", "mediumint", "int", "integer", "bigint",
+)
+_INT_WIDTH_RE = _re.compile(
+    r"^(" + "|".join(_INT_TYPES_WITH_WIDTH) + r")\(\d+\)"
+)
+
+# MariaDB stores `JSON` columns as `longtext` (with an auto-added
+# CHECK(json_valid(...)) constraint). The functional contract is identical
+# to MySQL's native JSON for our purposes — both validate and store JSON
+# text. We accept either when the expected type is `json`.
+_JSON_EQUIVALENTS = frozenset({"json", "longtext"})
+
+
+def _normalize_column_type(t: object) -> str:
+    """Lowercase and strip MariaDB-style integer display widths.
+
+    ``bigint(20) unsigned`` → ``bigint unsigned``
+    ``tinyint(1)``          → ``tinyint(1)``  (preserved — semantic boolean)
+    ``json``                → ``json``
+    """
+    s = str(t).lower().strip()
+    # tinyint(1) is semantically distinct (boolean hint) — keep its width.
+    # All other integer widths are noise; strip them.
+    if s.startswith("tinyint(1)"):
+        return s
+    s = _INT_WIDTH_RE.sub(r"\1", s)
+    return s
+
+
+def _types_match(expected: str, actual: object) -> bool:
+    """Compare types after normalizing widths and accepting json/longtext aliases."""
+    actual_n = _normalize_column_type(actual)
+    expected_n = expected.lower().strip()
+    if expected_n == "json":
+        return actual_n in _JSON_EQUIVALENTS
+    return actual_n == expected_n
+
+
 def validate_columns(rows: Sequence[Mapping[str, object]]) -> list[str]:
     """Compare information_schema.COLUMNS rows against the expected set.
 
@@ -172,12 +216,15 @@ def validate_columns(rows: Sequence[Mapping[str, object]]) -> list[str]:
         spec = EXPECTED_COLUMNS_AUDIT_LOGS[name]
         actual = found[name]
 
-        # COLUMN_TYPE check (case-insensitive — MySQL is consistent
-        # lowercase, but defensive against MariaDB / older versions).
-        actual_type = str(actual["COLUMN_TYPE"]).lower()
-        if actual_type != spec["column_type"]:
+        # COLUMN_TYPE check, MariaDB / older-MySQL aware:
+        # - integer display widths stripped: `bigint(20) unsigned` == `bigint unsigned`
+        # - MariaDB stores `JSON` as `longtext`; both accepted for an
+        #   expected type of `json`.
+        actual_type_raw = str(actual["COLUMN_TYPE"]).lower()
+        if not _types_match(spec["column_type"], actual_type_raw):
             diffs.append(
-                f"column {name}: type {actual_type!r}, expected {spec['column_type']!r}"
+                f"column {name}: type {actual_type_raw!r}, "
+                f"expected {spec['column_type']!r}"
             )
 
         # IS_NULLABLE check.

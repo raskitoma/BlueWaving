@@ -160,6 +160,50 @@ def test_column_types_are_compared_case_insensitively() -> None:
     assert validate_columns(rows) == []
 
 
+def test_mariadb_integer_widths_are_accepted() -> None:
+    """MariaDB / MySQL <= 8.0.16 preserve display widths on integer types:
+    `bigint(20) unsigned` should match an expected `bigint unsigned`."""
+    rows = copy.deepcopy(_healthy_column_rows())
+    for r in rows:
+        if r["COLUMN_NAME"] == "id":
+            r["COLUMN_TYPE"] = "bigint(20) unsigned"
+        if r["COLUMN_NAME"] == "ingest_run_id":
+            r["COLUMN_TYPE"] = "bigint(20) unsigned"
+    assert validate_columns(rows) == []
+
+
+def test_mariadb_json_as_longtext_is_accepted() -> None:
+    """MariaDB stores `JSON` columns as `longtext` (with a CHECK constraint).
+    Both representations are accepted by validate_columns."""
+    rows = copy.deepcopy(_healthy_column_rows())
+    for r in rows:
+        if r["COLUMN_NAME"] == "extra_data":
+            r["COLUMN_TYPE"] = "longtext"
+    assert validate_columns(rows) == []
+
+
+def test_mariadb_mixed_integer_widths_and_json_alias() -> None:
+    """Combine both MariaDB quirks: ints with widths + JSON-as-longtext."""
+    rows = copy.deepcopy(_healthy_column_rows())
+    for r in rows:
+        if r["COLUMN_NAME"] in ("id", "ingest_run_id"):
+            r["COLUMN_TYPE"] = "bigint(20) unsigned"
+        if r["COLUMN_NAME"] == "extra_data":
+            r["COLUMN_TYPE"] = "longtext"
+    assert validate_columns(rows) == []
+
+
+def test_wrong_int_type_with_width_still_reported() -> None:
+    """The width stripper must NOT mask a genuine type mismatch — e.g.
+    declaring ``user_id BIGINT`` instead of VARCHAR(64)."""
+    rows = copy.deepcopy(_healthy_column_rows())
+    for r in rows:
+        if r["COLUMN_NAME"] == "user_id":
+            r["COLUMN_TYPE"] = "bigint(20) unsigned"
+    diffs = validate_columns(rows)
+    assert any("column user_id" in d for d in diffs)
+
+
 # ---------------------------------------------------------------------------
 # Table-level charset cases
 # ---------------------------------------------------------------------------
