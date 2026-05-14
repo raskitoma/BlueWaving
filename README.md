@@ -8,36 +8,44 @@ Full design doc: [`BLUEWEB_AUDIT_INGEST_SPEC.md`](./BLUEWEB_AUDIT_INGEST_SPEC.md
 
 ---
 
-## Deploy (first time)
+## Deploy
 
 ```bash
 ./deploy.sh
 ```
 
-That's it. The script will:
+The wizard walks five steps:
 
-1. Check Docker is installed and running
-2. Build the image (`bluewave-worker:dev`)
-3. Generate `.env` with a fresh encryption key + your operator password hash
-4. Bring up the container
-5. Wait for `/healthz` to respond
+1. **Prerequisites** — confirms Docker + Compose v2 + curl + a reachable daemon
+2. **Build** — `docker build -t bluewave-worker:dev .`
+3. **Configure** — eight prompts, one per env var:
+   1. `CONFIG_ENC_KEYS` — Fernet key (auto-generated if new)
+   2. `WEB_USER` — operator username (default `admin`)
+   3. `WEB_PASS_HASH` — operator password (entered twice, bcrypt-hashed in-container)
+   4. `WEB_ALLOW_HTTP` — forced to `1` (spec L13)
+   5. `TZ` — forced to `UTC` (spec L17)
+   6. `LOG_LEVEL` — `DEBUG`/`INFO`/`WARNING`/`ERROR`
+   7. `CATCH_UP_CAP_DAYS` — max boot-time catch-up window
+   8. `BACKFILL_SAFETY_CAP_DAYS` — max age for a manual backfill
+4. **Write `.env`** — mode 600; existing file backed up with a timestamp suffix
+5. **Start** — `docker compose up -d`, poll `/healthz` for up to 60 s
 
-Then open **http://localhost:8080/config** in a browser, log in with the
-username/password you just entered, and fill in BlueWeb / MySQL / timezone /
-schedule. Click **Save** — the daily cron registers and boot-time catch-up
-runs automatically.
+**Re-running is safe.** Each prompt shows the existing value (passwords as
+`prefix…suffix`, keys as `AAAA***ZZZZ (44 chars)`); press Enter to keep, type
+to change. To start over, delete `.env` first.
 
-To regenerate the `.env` (rotate encryption key + operator password):
+After the script prints `/healthz status=unconfigured`, open
+**http://localhost:8080/config**, log in, and fill in BlueWeb / MySQL /
+timezone / schedule via the web UI.
 
-```bash
-FORCE_REGEN=1 ./deploy.sh
-```
-
-To run unattended in scripts:
+### Unattended first deploy
 
 ```bash
 WEB_USER=admin WEB_PASS='my-strong-pass' ./deploy.sh
 ```
+
+`CONFIG_ENC_KEYS` is always auto-generated on first run; rotation is a
+separate procedure (spec §13.8 via `python -m bluewave.rotate_config`).
 
 ---
 
