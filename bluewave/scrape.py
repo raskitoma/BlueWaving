@@ -194,11 +194,39 @@ def click_get_report_and_wait(
 
 
 def wipe_download_dir(directory: str | os.PathLike[str]) -> None:
-    """Delete every regular file in ``directory``. Tolerate locked files."""
+    """Delete every regular file in ``directory`` and verify it's writable.
+
+    Raises :class:`DownloadFailed` immediately if the directory exists but
+    the worker UID cannot write to it (e.g. a tmpfs mounted as root with
+    restrictive mode). Failing fast here surfaces the real cause rather
+    than a 60 s "file never appeared" timeout at the CSV-download step.
+    """
     d = Path(directory)
     if not d.exists():
-        d.mkdir(parents=True, exist_ok=True)
-        return
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise DownloadFailed(
+                f"could not create download dir {str(d)!r}: {e}"
+            ) from e
+
+    # Pre-flight writability check — fail fast if Chromium won't be able
+    # to land a file here.
+    probe = d / ".bluewave-write-probe"
+    try:
+        probe.write_text("ok", encoding="utf-8")
+    except OSError as e:
+        raise DownloadFailed(
+            f"download dir {str(d)!r} is not writable by uid={os.geteuid() if hasattr(os, 'geteuid') else '?'}: "
+            f"{e}. If this is a docker tmpfs mount, ensure mode=1777 or "
+            f"uid={os.geteuid() if hasattr(os, 'geteuid') else '?'}."
+        ) from e
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+
     for entry in d.iterdir():
         if entry.is_file() or entry.is_symlink():
             try:

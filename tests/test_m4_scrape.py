@@ -193,6 +193,28 @@ def test_wipe_download_dir_removes_files(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
+def test_wipe_download_dir_raises_download_failed_on_unwritable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """If the download dir exists but the worker can't write a probe file,
+    raise DownloadFailed immediately — don't wait 60 s for Chromium to time
+    out trying to land the CSV. This is the tmpfs-permission scenario."""
+    from bluewave.exceptions import DownloadFailed
+
+    # Make Path.write_text raise PermissionError to simulate an unwritable
+    # mount. We patch the bound method on the probe path.
+    real_write_text = Path.write_text
+
+    def fake_write_text(self, *args, **kwargs):
+        if self.name == ".bluewave-write-probe":
+            raise PermissionError("Permission denied")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fake_write_text)
+    with pytest.raises(DownloadFailed, match="not writable"):
+        scrape.wipe_download_dir(tmp_path)
+
+
 # ---------------------------------------------------------------------------
 # click_csv_and_await_file
 # ---------------------------------------------------------------------------

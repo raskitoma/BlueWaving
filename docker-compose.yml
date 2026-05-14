@@ -31,7 +31,12 @@ services:
       - bluewave-state:/var/lib/bluewave-worker
 
     tmpfs:
-      - /tmp/bluewave-dl:size=128m
+      # mode=1777 = world-writable with sticky bit (like /tmp itself).
+      # Without it, the tmpfs mount is owned by root and the worker UID
+      # (10001) cannot write — Chromium's CSV download silently fails →
+      # 60 s timeout → `download_failed`. Compose's short tmpfs syntax
+      # doesn't accept uid/gid, so a permissive mode is the simplest fix.
+      - /tmp/bluewave-dl:size=128m,mode=1777
 
     # Standalone-compose resource limits (spec §4.4).
     mem_limit: 1g
