@@ -74,17 +74,33 @@ def probe_mysql(cfg: Config) -> ProbeResult:
         # DictCursor — keys uppercased.
         cs = row.get("DEFAULT_CHARACTER_SET_NAME")
         co = row.get("DEFAULT_COLLATION_NAME")
+
+        # Strict at the *charset* level — `utf8` (3-byte legacy alias)
+        # silently truncates 4-byte characters (spec L20).
         if cs != "utf8mb4":
             return ProbeResult(
                 False,
                 f"database charset {cs!r}, expected 'utf8mb4' "
-                f"(spec L20 — legacy `utf8` truncates 4-byte chars)",
+                f"(legacy `utf8` truncates 4-byte chars; spec L20)",
+            )
+
+        # Lenient at the DB-default *collation* level — any utf8mb4_* is
+        # safe because our CREATE TABLE DDL pins the audit table itself to
+        # `utf8mb4_unicode_ci` regardless of the DB default. The strict
+        # collation check runs against the *table* at worker startup
+        # (see bluewave/schema.py).
+        if not isinstance(co, str) or not co.startswith("utf8mb4_"):
+            return ProbeResult(
+                False,
+                f"database collation {co!r}, expected a utf8mb4_* collation",
             )
         if co != "utf8mb4_unicode_ci":
             return ProbeResult(
-                False, f"database collation {co!r}, expected 'utf8mb4_unicode_ci'"
+                True,
+                f"SELECT 1 OK (DB collation {co!r}; the audit table will be "
+                f"created with utf8mb4_unicode_ci regardless)",
             )
-        return ProbeResult(True, "SELECT 1 OK, charset/collation OK")
+        return ProbeResult(True, "SELECT 1 OK, charset + collation OK")
     except pymysql.err.Error as e:
         return ProbeResult(False, f"{type(e).__name__}: {e}")
 

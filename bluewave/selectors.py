@@ -63,28 +63,29 @@ LOGIN_PASSWORD = Selector(
 # verified: TBD
 LOGIN_SUBMIT = Selector(
     By.XPATH,
-    "//button[normalize-space(.)='Login'] | "
-    "//input[@type='submit' and (@value='Login' or normalize-space(@value)='Login')]",
-    "Login submit button on the BlueWeb login form",
+    "//button[normalize-space()='Login'] | "
+    "//input[(@type='submit' or @type='button' or @type='image') "
+    "        and (@value='Login' or normalize-space(@value)='Login' "
+    "             or @alt='Login')] | "
+    "//a[normalize-space()='Login' and (@onclick or @href)]",
+    "Login submit control on the BlueWeb login form (button/input/styled link)",
 )
 
 # ---------------------------------------------------------------------------
 # S2 — Main menu (after successful login)
+#
+# We detect login *success* by the appearance of the Reports menu entry — it
+# is the destination we need anyway, and it's a more reliable signal than
+# any specific welcome text (which can drift by theme/localization).
 # ---------------------------------------------------------------------------
-
-# verified: TBD
-WELCOME_ADMIN = Selector(
-    By.XPATH,
-    "//*[contains(normalize-space(.), 'Welcome Administrator')]",
-    "Welcome Administrator banner shown after successful login",
-)
 
 # verified: TBD
 MAIN_MENU_REPORTS = Selector(
     By.XPATH,
-    "//a[normalize-space(.)='Reports'] | "
-    "//*[contains(@class,'icon') and .//*[normalize-space()='Reports']]",
-    "Reports icon / link on the main menu",
+    "//a[normalize-space()='Reports'] | "
+    "//*[normalize-space(text())='Reports' and (self::button or @onclick "
+    "    or ancestor::a[1] or ancestor::*[contains(@class,'icon')][1])]",
+    "Reports entry on the BlueWeb main menu (icon button / link / labelled tile)",
 )
 
 # ---------------------------------------------------------------------------

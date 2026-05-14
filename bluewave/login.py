@@ -22,6 +22,7 @@ from selenium.common.exceptions import (
     TimeoutException,
     WebDriverException,
 )
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
 
@@ -32,7 +33,6 @@ from .selectors import (
     LOGIN_SUBMIT,
     LOGIN_USERNAME,
     MAIN_MENU_REPORTS,
-    WELCOME_ADMIN,
 )
 
 
@@ -60,9 +60,12 @@ def login_and_navigate(
 
     * S1.a — GET ``url`` (transport reachability)
     * S1.b — wait for login form, fill, submit
-    * S1.c — wait for "Welcome Administrator"
-    * S2.a — click Reports
-    * S2.b — wait for "Choose Report:"
+    * S1.c — wait for the main menu (Reports entry) — this is our
+      authentication signal: if we can see Reports, we are logged in.
+      The login form's *absence* is the implicit second confirmation
+      because Reports does not appear on the login page.
+    * S2.a — click Reports (already located by the S1.c wait)
+    * S2.b — wait for "Choose Report:" caption on the Reports page
     """
     # S1.a — transport reachability.
     try:
@@ -83,22 +86,42 @@ def login_and_navigate(
     try:
         safe.type_into(LOGIN_USERNAME, user)
         safe.type_into(LOGIN_PASSWORD, password)
-        safe.click(LOGIN_SUBMIT)
     except NoSuchElementException as e:
-        raise NavFailed(f"login form element not found: {e}") from e
+        raise NavFailed(f"login form input not found: {e}") from e
 
-    # S1.c — welcome banner means we are authenticated.
+    # Try clicking the explicit submit control. If we can't locate it,
+    # fall back to pressing Enter in the password field — most forms (and
+    # certainly classic ASP.NET ones) submit on Enter regardless of the
+    # button's HTML shape.
+    try:
+        safe.click(LOGIN_SUBMIT)
+    except NoSuchElementException:
+        try:
+            pw_el = safe.find(LOGIN_PASSWORD)
+            pw_el.send_keys(Keys.ENTER)
+        except (NoSuchElementException, WebDriverException) as e:
+            raise NavFailed(
+                f"could not submit login form (no submit control, no Enter): {e}"
+            ) from e
+
+    # S1.c — main menu visible (Reports entry) means we are authenticated.
+    # We deliberately do NOT match a "Welcome …" banner: that text drifts
+    # by theme / localization. The presence of the Reports entry is both
+    # an unambiguous success signal and the destination for S2.
     try:
         WebDriverWait(safe.raw, login_wait_s).until(
-            EC.presence_of_element_located((WELCOME_ADMIN.by, WELCOME_ADMIN.value))
+            EC.presence_of_element_located(
+                (MAIN_MENU_REPORTS.by, MAIN_MENU_REPORTS.value)
+            )
         )
     except TimeoutException as e:
         raise AuthFailed(
-            "Welcome Administrator banner not visible — credentials rejected"
-            " or login error"
+            "Main menu not visible after submitting the login form — "
+            "credentials likely rejected, or BlueWeb returned an error page"
         ) from e
 
-    # S2.a — Reports icon must be clickable.
+    # S2.a — Reports must be clickable (it's present per S1.c, now wait
+    # for any JS-driven enabling to finish).
     try:
         WebDriverWait(safe.raw, nav_wait_s).until(
             EC.element_to_be_clickable(
@@ -106,7 +129,7 @@ def login_and_navigate(
             )
         )
     except TimeoutException as e:
-        raise NavFailed("Reports icon did not become clickable") from e
+        raise NavFailed("Reports entry did not become clickable") from e
 
     try:
         safe.click(MAIN_MENU_REPORTS)

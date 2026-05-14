@@ -568,12 +568,74 @@ code { background: #f3f4f6; padding: 0.1rem 0.35rem; border-radius: 3px;
 
 
 # Vanilla-JS form submission with CSRF header. No external deps.
+#
+# Also includes a localStorage "draft" feature: every non-password field
+# auto-saves on input change, and is restored on page load into any field
+# the server didn't already pre-populate. Passwords are deliberately
+# excluded from localStorage — they get re-entered each session.
 _CONFIG_JS = r"""
 (function() {
   const form = document.getElementById('cfg');
   const status = document.getElementById('status');
   const csrfToken = form.querySelector('input[name=csrf_token]').value;
   const NUMERIC = new Set(['mysql_port', 'catch_up_cap_days']);
+  const SENSITIVE = new Set(['blueweb_password', 'mysql_password', 'csrf_token']);
+  const DRAFT_KEY = 'bluewave.cfg.draft.v1';
+
+  // ----- localStorage draft ------------------------------------------------
+
+  function saveDraft() {
+    const fd = new FormData(form);
+    const draft = {};
+    for (const [k, v] of fd.entries()) {
+      if (SENSITIVE.has(k)) continue;
+      if (v !== '' && v !== null) draft[k] = v;
+    }
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify(draft)); } catch (e) {}
+  }
+  function restoreDraft() {
+    let draft;
+    try { draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || '{}'); }
+    catch (e) { return false; }
+    let restored = 0;
+    for (const [k, v] of Object.entries(draft || {})) {
+      if (SENSITIVE.has(k)) continue;
+      const input = form.querySelector('[name="' + k + '"]');
+      if (input && !input.value) { input.value = v; restored++; }
+    }
+    return restored > 0;
+  }
+  function clearDraft() {
+    try { localStorage.removeItem(DRAFT_KEY); } catch (e) {}
+    const ind = document.getElementById('draft-indicator');
+    if (ind) ind.remove();
+  }
+  function showDraftIndicator() {
+    if (document.getElementById('draft-indicator')) return;
+    const note = document.createElement('div');
+    note.id = 'draft-indicator';
+    note.className = 'muted';
+    note.style.marginBottom = '0.75rem';
+    note.innerHTML =
+      '↻ Restored from local draft. ' +
+      '<a href="#" id="draft-discard">Discard draft</a> · ' +
+      '<span class="muted">(passwords are never stored)</span>';
+    form.parentNode.insertBefore(note, form);
+    document.getElementById('draft-discard').addEventListener('click', (ev) => {
+      ev.preventDefault();
+      if (!confirm('Discard local draft? The form will reset to server-saved values.')) return;
+      clearDraft();
+      location.reload();
+    });
+  }
+
+  // Restore on load.
+  if (restoreDraft()) showDraftIndicator();
+
+  // Save on every input change.
+  form.addEventListener('input', saveDraft);
+
+  // ----- submit + test helpers --------------------------------------------
 
   function payloadFromForm() {
     const fd = new FormData(form);
@@ -623,10 +685,12 @@ _CONFIG_JS = r"""
     disable(false);
     if (!resp) { show('fail', '<strong>Network error.</strong>'); return; }
     if (resp.ok && data.saved) {
+      clearDraft();  // server now has the canonical values
       show('ok', '<strong>Saved.</strong>' + probes(data.probes) +
         ' <a href="/">&larr; Back to dashboard</a>');
     } else if (data.probes) {
-      show('fail', '<strong>Not saved — a probe failed:</strong>' + probes(data.probes));
+      show('fail', '<strong>Not saved — a probe failed:</strong>' + probes(data.probes) +
+        '<p class="muted">Your entries are kept locally. Fix the failing probe and try again.</p>');
     } else {
       show('fail', '<strong>Validation error.</strong><pre>' +
         esc(JSON.stringify(data, null, 2)) + '</pre>');
