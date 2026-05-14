@@ -1,161 +1,130 @@
-# BlueWeb Audit Ingest Worker
+# bluewave-worker
 
-Dockerized headless Selenium worker that scrapes a local BlueWeb v20
-*Event* report once a day and writes the rows into a shared MySQL audit
-table `z_audit_logs_efk`.
+Dockerized headless Selenium worker that pulls the daily **BlueWeb v20 Event
+report** and writes the rows into the shared MySQL audit table
+`z_audit_logs_efk`.
 
-**Full spec:** [`BLUEWEB_AUDIT_INGEST_SPEC.md`](./BLUEWEB_AUDIT_INGEST_SPEC.md).
-The spec is the source of truth; this README is a pointer + quickstart.
+Full design doc: [`BLUEWEB_AUDIT_INGEST_SPEC.md`](./BLUEWEB_AUDIT_INGEST_SPEC.md)
+
+---
+
+## Deploy (first time)
+
+```bash
+./deploy.sh
+```
+
+That's it. The script will:
+
+1. Check Docker is installed and running
+2. Build the image (`bluewave-worker:dev`)
+3. Generate `.env` with a fresh encryption key + your operator password hash
+4. Bring up the container
+5. Wait for `/healthz` to respond
+
+Then open **http://localhost:8080/config** in a browser, log in with the
+username/password you just entered, and fill in BlueWeb / MySQL / timezone /
+schedule. Click **Save** — the daily cron registers and boot-time catch-up
+runs automatically.
+
+To regenerate the `.env` (rotate encryption key + operator password):
+
+```bash
+FORCE_REGEN=1 ./deploy.sh
+```
+
+To run unattended in scripts:
+
+```bash
+WEB_USER=admin WEB_PASS='my-strong-pass' ./deploy.sh
+```
+
+---
+
+## Day-to-day
+
+| Action | Command |
+|---|---|
+| Check status | `curl -s http://localhost:8080/healthz \| jq .` |
+| View logs | `docker compose logs -f bluewave-worker` |
+| Restart | `docker compose restart bluewave-worker` |
+| Upgrade image | `docker compose pull && docker compose up -d` |
+| Stop | `docker compose down` |
+| Rotate config key | see [`§13.8`](./BLUEWEB_AUDIT_INGEST_SPEC.md) of the spec |
+
+The web UI at **http://localhost:8080/** shows:
+
+- last 20 runs with status + row counts
+- "Run now" button (yesterday)
+- "Backfill" button (any past date)
+- "Catch up missing" button (enqueues every missing day since the last `ok`)
+
+---
+
+## What the worker does
+
+Every day at the configured local time:
+
+1. Headless Chromium logs into BlueWeb
+2. Selects the Event report for yesterday's date
+3. Downloads the CSV
+4. Transforms each row → `(timestamp, source='Bluewave', operation, instance, user_name, user_id, extra_data, dedup_hash)`
+5. Inserts into `z_audit_logs_efk` (idempotent via `dedup_hash`)
+6. Records the run in `z_audit_logs_efk_runs`
+7. Deletes the local CSV
+
+If the container is offline when a scheduled run should fire, **boot-time
+catch-up** enqueues every missing day on next start (cap: 14 days).
+
+---
 
 ## Status
 
-Implementation is staged by milestone. See spec §10.
+All milestones complete. 179 unit tests passing, 19 gated by Docker / live
+BlueWeb (auto-skip when the resource isn't available).
 
-- [x] **M1** — container skeleton + `/healthz` scaffold + `keygen` / `hashpw` CLIs
-- [x] **M2** — MySQL schema bootstrap (DDL, validate, drift detection, idempotency)
-- [x] **M3** — Selenium login + selector catalog (S1+S2, denylist enforcement)
-- [x] **M4** — full Selenium flow + CSV capture (S3–S7, empty-report handling)
-- [x] **M5** — CSV→Row transform (golden fixture, DST handling, dedup hash)
-- [x] **M6** — idempotent DB writes + run lifecycle (start/finalize/reap)
-- [x] **M7** — web GUI: config form, triple-probe, run/catchup/runs routes, Basic Auth + CSRF
-- [x] **M8** — APScheduler daily fire + boot-time catch-up + reconfigure on save
-- [x] **M9** — hardening: `rotate_config` CLI, screenshot retention GC, structured JSON logs
-- [ ] **M4** — Full Selenium flow + CSV capture
-- [ ] **M5** — CSV → rows transform
-- [ ] **M6** — Idempotent DB writes
-- [ ] **M7** — Web GUI
-- [ ] **M8** — Scheduler + catch-up
-- [ ] **M9** — Hardening + soak
+- [x] M1 — container + `/healthz` + `keygen` / `hashpw`
+- [x] M2 — MySQL schema bootstrap + drift detection
+- [x] M3 — Selenium login + selector catalog + denylist
+- [x] M4 — Event report → CSV download
+- [x] M5 — CSV → typed rows (DST handling, golden fixture)
+- [x] M6 — idempotent insert + run lifecycle
+- [x] M7 — web GUI: config / run / runs / catchup
+- [x] M8 — APScheduler daily fire + catch-up
+- [x] M9 — key rotation CLI + screenshot GC + JSON logs
 
-## Quickstart (M1 only)
+---
 
-The container at M1 has no persistence layer yet, so `/healthz` always
-returns 503 `unconfigured`. This is by design — it proves the boot path,
-env validation, and HTTP surface work end-to-end.
-
-```bash
-# 1. Generate a Fernet key
-docker run --rm -v "$PWD:/app" -w /app python:3.12-slim \
-    sh -c 'pip install --quiet cryptography==43.0.0 && python -m bluewave.keygen'
-
-# 2. Generate a bcrypt hash for the operator password
-docker run --rm -it -v "$PWD:/app" -w /app python:3.12-slim \
-    sh -c 'pip install --quiet bcrypt==4.2.0 && python -m bluewave.hashpw'
-
-# 3. Copy .env.example to .env, paste the values from steps 1 & 2.
-cp .env.example .env
-$EDITOR .env
-
-# 4. Build + run.
-docker compose build
-docker compose up -d
-
-# 5. Verify.
-curl -s http://localhost:8080/healthz | jq .
-# Expect: status=503, body.status="unconfigured", body.reasons=["no_config"]
-```
-
-## Local development (no Docker)
+## Running tests
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
-
-export CONFIG_ENC_KEYS=$(python -m bluewave.keygen)
-export WEB_USER=admin
-export WEB_PASS_HASH='$2b$12$stub'    # any non-empty value while M1 doesn't verify it
-export WEB_ALLOW_HTTP=1
-
-# Run.
-python -m bluewave.web
-
-# Or run tests.
 pytest
 ```
 
-## Layout
+Tests that need extra resources auto-skip with a clear reason:
+
+| Test family | Requires |
+|---|---|
+| `test_m2_schema_integration` & `test_m6_sink_runs` (real MySQL via testcontainers) | Docker daemon reachable |
+| `test_m3_smoke` (live BlueWeb login) | `BLUEWAVE_SMOKE_URL` / `_USER` / `_PASS` env vars |
+
+---
+
+## Project layout
 
 ```
 .
-├── BLUEWEB_AUDIT_INGEST_SPEC.md   # design doc — source of truth
+├── deploy.sh                  # first-time deploy automation
 ├── Dockerfile
 ├── docker-compose.yml
-├── requirements.txt               # runtime deps
-├── requirements-dev.txt           # + pytest, httpx
-├── pyproject.toml                 # pytest config
-├── .env.example
-├── bluewave/                      # package
-│   ├── __init__.py
-│   ├── web.py                     # FastAPI app + /healthz
-│   ├── keygen.py                  # Fernet key CLI
-│   ├── hashpw.py                  # bcrypt hash CLI
-│   ├── db.py                      # pymysql connection factory (kwargs-only)
-│   ├── schema.py                  # DDL + bootstrap + drift validation
-│   ├── exceptions.py              # RunFailure hierarchy keyed to §6.4.5
-│   ├── selectors.py               # Selector catalog + DENYLIST
-│   ├── driver.py                  # Chromium builder + SafeDriver
-│   ├── login.py                   # S1+S2 + CLI smoke entrypoint
-│   ├── scrape.py                  # S3–S7 (Event report → CSV)
-│   ├── dedup.py                   # canonical_extra_data + dedup_hash
-│   ├── transform.py               # CSV → Row[] with DST handling
-│   ├── sink.py                    # idempotent batch INSERT
-│   ├── runs.py                    # z_audit_logs_efk_runs lifecycle
-│   ├── config.py                  # Fernet-encrypted SQLite config store
-│   ├── auth.py                    # Basic Auth + CSRF
-│   ├── probes.py                  # BlueWeb HEAD / MySQL / Selenium login
-│   ├── routes.py                  # FastAPI routes + minimal HTML
-│   ├── orchestrator.py            # in-process run queue + run_job()
-│   ├── scheduler.py               # APScheduler daily fire + boot catch-up
-│   ├── screenshots.py             # retention GC
-│   ├── logging_setup.py           # structured JSON logs
-│   └── rotate_config.py           # CLI for key rotation
-└── tests/
-    ├── test_m1_env.py
-    ├── test_m1_healthz.py
-    ├── test_m1_cli.py
-    ├── test_m2_schema_unit.py        # runs everywhere
-    ├── test_m2_schema_integration.py # skipped without Docker
-    ├── test_m3_driver.py             # Chromium options + denylist
-    ├── test_m3_selectors.py          # greppability + denylist content
-    ├── test_m3_login.py              # status taxonomy (mocked)
-    └── test_m3_smoke.py              # live BlueWeb, skipped without env
+├── requirements.txt           # runtime deps
+├── requirements-dev.txt       # + pytest, httpx, testcontainers
+├── pyproject.toml             # pytest config
+├── BLUEWEB_AUDIT_INGEST_SPEC.md
+├── bluewave/                  # ~3.7k LOC production
+└── tests/                     # ~3.2k LOC tests + golden CSV
 ```
 
-## Running integration tests
-
-The M2 (+ later M4/M6/M8) integration tests need a real MySQL via
-[testcontainers](https://testcontainers-python.readthedocs.io/).
-With Docker running, just:
-
-```bash
-pytest                 # all tests (integration ones spin up MySQL on demand)
-pytest -m "not skip"   # same effect; skipped tests stay skipped
-```
-
-Without Docker, the integration tests are skipped and pytest still passes —
-the unit tests verify the pure validation logic, the DDL coherence,
-and the connection-factory contract.
-
-## Running the M3 live smoke test
-
-Once Chromium and chromedriver are available locally (the container always
-has them), point the smoke test at your live BlueWeb:
-
-```bash
-BLUEWAVE_SMOKE_URL=http://blueweb.lan \
-BLUEWAVE_SMOKE_USER=admin \
-BLUEWAVE_SMOKE_PASS=... \
-    pytest tests/test_m3_smoke.py -v
-```
-
-Or run the CLI directly:
-
-```bash
-python -m bluewave.login http://blueweb.lan admin '<password>'
-# Exits 0 on success and prints "ok status=login_ok screenshot=<path>"
-# Exits 1 on failure with status= one of auth_failed / nav_failed
-```
-
-The first successful smoke run is also where you confirm the placeholder
-selectors in `bluewave/selectors.py` actually match the live HTML. If any
-selector fails, update `selectors.py` and re-run.
+For module-level detail see the spec §4.3 + §10 (milestones).

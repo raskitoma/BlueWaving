@@ -1,12 +1,14 @@
 # Local dev compose file for the BlueWeb audit ingest worker.
 # See BLUEWEB_AUDIT_INGEST_SPEC.md §4.4.
 #
-# Production deploys should replace `build: .` with a digest-pinned image:
+# Production deploys should replace `build: .` + `image:` with a
+# digest-pinned remote image:
 #   image: registry.local/bluewave-worker@sha256:<digest>
 
 services:
   bluewave-worker:
     build: .
+    image: bluewave-worker:dev
     container_name: bluewave-worker
     restart: unless-stopped
 
