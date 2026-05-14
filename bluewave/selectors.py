@@ -45,30 +45,33 @@ class Selector:
 # S1 — Login page
 # ---------------------------------------------------------------------------
 
-# verified: TBD (placeholder — confirm via test_m3_smoke against live BlueWeb)
+# verified: 2026-05-14 against live BlueWeb v20 (Easy Foods Inc.).
 LOGIN_USERNAME = Selector(
-    By.XPATH,
-    "//input[(@name='username') or (@id='username') or "
-    "(preceding::*[normalize-space()='User Name'][1])]",
+    By.ID,
+    "tbUserName",
     "User Name input on the BlueWeb login form",
 )
 
-# verified: TBD
+# verified: 2026-05-14
 LOGIN_PASSWORD = Selector(
-    By.XPATH,
-    "//input[(@type='password') or (@name='password') or (@id='password')]",
+    By.ID,
+    "tbPassword",
     "Password input on the BlueWeb login form",
 )
 
-# verified: TBD
+# Not provided by the operator — falling back to a permissive XPath PLUS
+# the Enter-key fallback in login.py. ASP.NET login forms almost always
+# submit on Enter in the password field, so this is robust even if the
+# button selector misses.
 LOGIN_SUBMIT = Selector(
     By.XPATH,
+    "//*[@id='btnLogin' or @id='Login' or @id='btnSubmit'] | "
     "//button[normalize-space()='Login'] | "
     "//input[(@type='submit' or @type='button' or @type='image') "
     "        and (@value='Login' or normalize-space(@value)='Login' "
     "             or @alt='Login')] | "
     "//a[normalize-space()='Login' and (@onclick or @href)]",
-    "Login submit control on the BlueWeb login form (button/input/styled link)",
+    "Login submit control (best-guess; Enter-key fallback in login.py)",
 )
 
 # ---------------------------------------------------------------------------
@@ -79,74 +82,72 @@ LOGIN_SUBMIT = Selector(
 # any specific welcome text (which can drift by theme/localization).
 # ---------------------------------------------------------------------------
 
-# verified: TBD
+# verified: 2026-05-14
 MAIN_MENU_REPORTS = Selector(
-    By.XPATH,
-    "//a[normalize-space()='Reports'] | "
-    "//*[normalize-space(text())='Reports' and (self::button or @onclick "
-    "    or ancestor::a[1] or ancestor::*[contains(@class,'icon')][1])]",
-    "Reports entry on the BlueWeb main menu (icon button / link / labelled tile)",
+    By.ID,
+    "btnReports_quicklinks",
+    "Reports button (Quick Links bar) — present on the main menu and "
+    "persists across post-login pages",
 )
 
 # ---------------------------------------------------------------------------
 # S3, S4, S6, S7 — Reports page
 # ---------------------------------------------------------------------------
 
-# verified: TBD
+# verified: 2026-05-14 (ASP.NET ContentPlaceHolder id)
 REPORT_TYPE_DROPDOWN = Selector(
-    By.XPATH,
-    "//select[contains(@name,'eport') or contains(@id,'eport')] | "
-    "//*[normalize-space(.)='Choose Report:']/following::select[1]",
+    By.ID,
+    "ctl00_ContentPlaceHolder1_ddlReportType",
     "Choose Report dropdown on the Reports page",
 )
 
-# verified: TBD
+# verified: 2026-05-14
 START_DATE_INPUT = Selector(
-    By.XPATH,
-    "//input[contains(@name,'tart') or contains(@id,'tart')] | "
-    "//*[normalize-space(.)='Start Date']/following::input[1]",
-    "Start Date text input on the Reports page",
+    By.ID,
+    "txtStartDate",
+    "Start Date text input on the Reports page (mm/dd/yyyy)",
 )
 
-# verified: TBD
+# verified: 2026-05-14
 END_DATE_INPUT = Selector(
-    By.XPATH,
-    "//input[contains(@name,'nd') and contains(@name,'ate') or "
-    "(contains(@id,'nd') and contains(@id,'ate'))] | "
-    "//*[normalize-space(.)='End Date']/following::input[1]",
-    "End Date text input on the Reports page",
+    By.ID,
+    "txtEndDate",
+    "End Date text input on the Reports page (mm/dd/yyyy)",
 )
 
-# verified: TBD
+# verified: 2026-05-14
 GET_REPORT_BUTTON = Selector(
-    By.XPATH,
-    "//button[normalize-space(.)='Get Report'] | "
-    "//input[@type='submit' and "
-    "(@value='Get Report' or normalize-space(@value)='Get Report')]",
+    By.ID,
+    "ctl00_ContentPlaceHolder1_btnGetReport",
     "Get Report submit button",
 )
 
-# verified: TBD
+# verified: 2026-05-14 — positional path from the DataTables 'buttons' toolbar.
+# The toolbar's first div holds Copy / CSV / Excel / PDF / Print as button[1..5];
+# CSV is button[2]. Permissive text-based fallback in case ordering changes.
 CSV_EXPORT_BUTTON = Selector(
     By.XPATH,
-    "//button[normalize-space(.)='CSV'] | "
-    "//a[normalize-space(.)='CSV']",
-    "CSV export button on the results toolbar",
+    "//*[@id='tblReportResults_wrapper']/div[1]/button[2] | "
+    "//*[@id='tblReportResults_wrapper']//button[normalize-space()='CSV'] | "
+    "//button[normalize-space()='CSV']",
+    "CSV export button on the DataTables results toolbar",
 )
 
-# verified: TBD
+# verified: 2026-05-14
 REPORT_RESULTS_FIRST_ROW = Selector(
-    By.CSS_SELECTOR,
-    "table tbody tr",
-    "First data row of the rendered results table (presence ⇒ report has data)",
+    By.XPATH,
+    "//*[@id='tblReportResults']/tbody/tr[1]",
+    "First row of the results table — present whether the report has data "
+    "or shows the 'No data' indicator (distinguish via REPORT_NO_RESULTS_INDICATOR)",
 )
 
-# verified: TBD — DataTables convention
+# verified: 2026-05-14 — DataTables emits a tr with td.dataTables_empty when empty
 REPORT_NO_RESULTS_INDICATOR = Selector(
     By.XPATH,
-    "//td[contains(normalize-space(.), 'No data available')] | "
-    "//*[contains(normalize-space(.), 'No matching records')]",
-    "'No data available in table' / similar indicator when report is empty",
+    "//*[@id='tblReportResults']//td[contains(@class,'dataTables_empty')] | "
+    "//*[@id='tblReportResults']//td[contains(normalize-space(.),'No data available')] | "
+    "//*[@id='tblReportResults']//td[contains(normalize-space(.),'No matching records')]",
+    "DataTables 'No data available' indicator inside the results table",
 )
 
 # ---------------------------------------------------------------------------
