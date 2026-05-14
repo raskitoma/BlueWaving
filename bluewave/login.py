@@ -45,6 +45,86 @@ REPORTS_PAGE_MARKER = "Choose Report:"
 DEFAULT_SCREENSHOT_DIR = "/var/lib/bluewave-worker/screenshots"
 
 
+# ---------------------------------------------------------------------------
+# Diagnostics — capture page state when login fails so the operator can
+# tell apart bad creds, selector drift, and unexpected redirects.
+# ---------------------------------------------------------------------------
+
+
+def _short(s: object, limit: int = 250) -> str:
+    """Squeeze a string into a single-line excerpt."""
+    text = " ".join(str(s).split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def capture_page_state(
+    driver,
+    *,
+    save_html_to: str | None = None,
+) -> dict:
+    """Return a dict describing the current page for diagnostic purposes.
+
+    Best-effort — every accessor is wrapped because the driver may be in a
+    half-dead state by the time we get here.
+    """
+    state: dict[str, object] = {}
+    for key, fn in (
+        ("url",   lambda: driver.current_url),
+        ("title", lambda: driver.title),
+    ):
+        try:
+            state[key] = fn()
+        except Exception:
+            state[key] = None
+
+    # Body excerpt — 250 chars of visible text, helps spot "Invalid login"
+    # or distinguish login page from dashboard.
+    try:
+        body = driver.find_element("tag name", "body").text or ""
+        state["body_excerpt"] = _short(body)
+    except Exception:
+        state["body_excerpt"] = None
+
+    # Did the login form's username input survive? If yes → we're probably
+    # still on the login page (failed submit OR rejected creds).
+    try:
+        from .selectors import LOGIN_USERNAME
+
+        els = driver.find_elements(LOGIN_USERNAME.by, LOGIN_USERNAME.value)
+        state["login_form_still_visible"] = bool(els)
+    except Exception:
+        state["login_form_still_visible"] = None
+
+    # Drop the raw page source to disk for offline inspection.
+    if save_html_to:
+        try:
+            with open(save_html_to, "w", encoding="utf-8") as f:
+                f.write(driver.page_source or "")
+            state["page_source_path"] = save_html_to
+        except Exception:
+            state["page_source_path"] = None
+
+    return state
+
+
+def _state_to_message(state: dict) -> str:
+    """Render the dict from capture_page_state into a one-line summary."""
+    parts: list[str] = []
+    if state.get("login_form_still_visible") is True:
+        parts.append("login form still visible (creds rejected or submit failed)")
+    elif state.get("login_form_still_visible") is False:
+        parts.append("login form is gone — landed on an unexpected page")
+    if state.get("url"):
+        parts.append(f"url={state['url']!r}")
+    if state.get("title"):
+        parts.append(f"title={state['title']!r}")
+    if state.get("body_excerpt"):
+        parts.append(f"body={state['body_excerpt']!r}")
+    if state.get("page_source_path"):
+        parts.append(f"html dumped to {state['page_source_path']}")
+    return "; ".join(parts) if parts else "no page state captured"
+
+
 def login_and_navigate(
     safe: SafeDriver,
     url: str,
@@ -115,9 +195,25 @@ def login_and_navigate(
             )
         )
     except TimeoutException as e:
+        # Capture page state for diagnostics. If we can write to the
+        # screenshots dir, also dump full page source so the operator can
+        # inspect the actual HTML and tune selectors.
+        html_dump: str | None = None
+        try:
+            os.makedirs(DEFAULT_SCREENSHOT_DIR, exist_ok=True)
+            html_dump = os.path.join(
+                DEFAULT_SCREENSHOT_DIR, f"{int(time.time())}_login_fail.html"
+            )
+        except OSError:
+            html_dump = None
+
+        try:
+            state = capture_page_state(safe.raw, save_html_to=html_dump)
+        except Exception:
+            state = {}
+
         raise AuthFailed(
-            "Main menu not visible after submitting the login form — "
-            "credentials likely rejected, or BlueWeb returned an error page"
+            "Main menu not visible after submit. " + _state_to_message(state)
         ) from e
 
     # S2.a — Reports must be clickable (it's present per S1.c, now wait

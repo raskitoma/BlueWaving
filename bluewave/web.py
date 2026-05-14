@@ -146,8 +146,31 @@ def create_app(
     return app
 
 
+def _install_healthz_log_filter() -> None:
+    """Drop uvicorn access-log lines for ``GET /healthz`` from loopback.
+
+    These are Docker's internal HEALTHCHECK poll (every 60 s while the
+    container is unconfigured → 503), and they drown out the operationally
+    meaningful access log. External callers (any non-loopback IP) are
+    kept — those are real monitoring or browser hits.
+    """
+    import logging
+
+    class _DropLoopbackHealthz(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:  # True = keep
+            msg = record.getMessage()
+            if "GET /healthz" not in msg:
+                return True
+            # uvicorn format: '%s:%s - "%s %s HTTP/%s" %d %s'
+            # Loopback identifiers we want to drop:
+            return not any(s in msg for s in ("127.0.0.1:", "[::1]:", "localhost:"))
+
+    logging.getLogger("uvicorn.access").addFilter(_DropLoopbackHealthz())
+
+
 def main() -> None:
     _enforce_env_or_exit()
+    _install_healthz_log_filter()
     import uvicorn
 
     bind = os.environ.get("WEB_BIND", "0.0.0.0:8080")

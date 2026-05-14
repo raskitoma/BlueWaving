@@ -33,10 +33,10 @@ class ProbeResult:
     detail: str
 
 
-def probe_blueweb_http(cfg: Config, timeout_s: float = 5.0) -> ProbeResult:
-    """HEAD the configured URL. Failure → ``ok=False`` with the error name."""
+def probe_blueweb_http(*, url: str, timeout_s: float = 5.0) -> ProbeResult:
+    """HEAD ``url``. Failure → ``ok=False`` with the error name."""
     try:
-        req = urllib.request.Request(cfg.blueweb_url, method="HEAD")
+        req = urllib.request.Request(url, method="HEAD")
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             code = resp.getcode()
         if code >= 500:
@@ -48,16 +48,23 @@ def probe_blueweb_http(cfg: Config, timeout_s: float = 5.0) -> ProbeResult:
         return ProbeResult(False, f"{type(e).__name__}: {e}")
 
 
-def probe_mysql(cfg: Config) -> ProbeResult:
+def probe_mysql(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    user: str,
+    password: str,
+) -> ProbeResult:
     """``SELECT 1`` + charset/collation sanity check on the audit DB."""
     try:
         with connect(
             MysqlConfig(
-                host=cfg.mysql_host,
-                port=cfg.mysql_port,
-                user=cfg.mysql_user,
-                password=cfg.mysql_password,
-                database=cfg.mysql_database,
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+                database=database,
             )
         ) as conn:
             with conn.cursor() as cur:
@@ -66,11 +73,11 @@ def probe_mysql(cfg: Config) -> ProbeResult:
                 cur.execute(
                     "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME "
                     "FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = %s",
-                    (cfg.mysql_database,),
+                    (database,),
                 )
                 row = cur.fetchone()
         if not row:
-            return ProbeResult(False, f"database {cfg.mysql_database!r} not visible")
+            return ProbeResult(False, f"database {database!r} not visible")
         # DictCursor — keys uppercased.
         cs = row.get("DEFAULT_CHARACTER_SET_NAME")
         co = row.get("DEFAULT_COLLATION_NAME")
@@ -105,7 +112,7 @@ def probe_mysql(cfg: Config) -> ProbeResult:
         return ProbeResult(False, f"{type(e).__name__}: {e}")
 
 
-def probe_bluewave_login(cfg: Config) -> ProbeResult:
+def probe_bluewave_login(*, url: str, user: str, password: str) -> ProbeResult:
     """Spin a one-shot headless Chromium and run S1+S2.
 
     Slow (~10–20 s) but catches the cases other probes can't: wrong creds,
@@ -116,7 +123,7 @@ def probe_bluewave_login(cfg: Config) -> ProbeResult:
         with build_driver() as raw:
             safe = SafeDriver(raw)
             login_and_navigate(
-                safe, cfg.blueweb_url, cfg.blueweb_user, cfg.blueweb_password,
+                safe, url, user, password,
                 login_wait_s=20, nav_wait_s=10,
             )
     except AuthFailed as e:
@@ -135,13 +142,30 @@ def triple_probe(cfg: Config) -> tuple[bool, list[tuple[str, ProbeResult]]]:
     Returns ``(overall_ok, [(name, ProbeResult), ...])``.
     """
     results: list[tuple[str, ProbeResult]] = []
-    for name, fn in [
-        ("blueweb_http", probe_blueweb_http),
-        ("mysql",        probe_mysql),
-        ("bluewave_login", probe_bluewave_login),
-    ]:
-        r = fn(cfg)
-        results.append((name, r))
-        if not r.ok:
-            return False, results
+
+    r = probe_blueweb_http(url=cfg.blueweb_url)
+    results.append(("blueweb_http", r))
+    if not r.ok:
+        return False, results
+
+    r = probe_mysql(
+        host=cfg.mysql_host,
+        port=cfg.mysql_port,
+        database=cfg.mysql_database,
+        user=cfg.mysql_user,
+        password=cfg.mysql_password,
+    )
+    results.append(("mysql", r))
+    if not r.ok:
+        return False, results
+
+    r = probe_bluewave_login(
+        url=cfg.blueweb_url,
+        user=cfg.blueweb_user,
+        password=cfg.blueweb_password,
+    )
+    results.append(("bluewave_login", r))
+    if not r.ok:
+        return False, results
+
     return True, results

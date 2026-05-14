@@ -114,6 +114,24 @@ class RunRequest(BaseModel):
     report_date: Optional[str] = None  # YYYY-MM-DD or None for "yesterday"
 
 
+# Slim payloads for the per-probe test endpoints — they only require the
+# subset of fields each probe actually uses, so the operator can click
+# `Test BlueWeb` after filling in just the BlueWeb section, without yet
+# having entered MySQL / schedule fields.
+class BlueWebTestPayload(BaseModel):
+    blueweb_url: str = Field(min_length=1)
+    blueweb_user: str = Field(min_length=1)
+    blueweb_password: str = Field(min_length=1)
+
+
+class MysqlTestPayload(BaseModel):
+    mysql_host: str = Field(min_length=1)
+    mysql_port: int = Field(ge=1, le=65535, default=3306)
+    mysql_database: str = Field(min_length=1)
+    mysql_user: str = Field(min_length=1)
+    mysql_password: str = Field(min_length=1)
+
+
 # ---------------------------------------------------------------------------
 # Route registration
 # ---------------------------------------------------------------------------
@@ -283,26 +301,30 @@ def register_routes(app: FastAPI) -> None:
 
     @app.post("/config/test/bluewave")
     async def test_bluewave(
-        payload: ConfigPayload,
+        payload: BlueWebTestPayload,
         _: str = Depends(require_basic_auth),
         __: None = Depends(require_csrf),
     ) -> dict:
-        if not payload.blueweb_password:
-            raise HTTPException(400, "blueweb_password required for test")
-        cfg = _payload_to_cfg(payload)
-        r = probe_bluewave_login(cfg)
+        r = probe_bluewave_login(
+            url=payload.blueweb_url,
+            user=payload.blueweb_user,
+            password=payload.blueweb_password,
+        )
         return {"result": "ok" if r.ok else "failed", "detail": r.detail}
 
     @app.post("/config/test/mysql")
     async def test_mysql(
-        payload: ConfigPayload,
+        payload: MysqlTestPayload,
         _: str = Depends(require_basic_auth),
         __: None = Depends(require_csrf),
     ) -> dict:
-        if not payload.mysql_password:
-            raise HTTPException(400, "mysql_password required for test")
-        cfg = _payload_to_cfg(payload)
-        r = probe_mysql(cfg)
+        r = probe_mysql(
+            host=payload.mysql_host,
+            port=payload.mysql_port,
+            database=payload.mysql_database,
+            user=payload.mysql_user,
+            password=payload.mysql_password,
+        )
         return {"result": "ok" if r.ok else "failed", "detail": r.detail}
 
     # =====================================================================
@@ -697,15 +719,28 @@ _CONFIG_JS = r"""
     }
   });
 
-  async function runTest(button, url, requiresField, fieldLabel) {
-    const payload = payloadFromForm();
-    if (requiresField && !payload[requiresField]) {
-      show('fail', 'Enter <strong>' + esc(fieldLabel) + '</strong> first.');
+  // Each test endpoint only requires its own fields. Build a slim payload
+  // so unfilled fields elsewhere on the form don't trigger 422.
+  async function runTest(button, url, requiredFields) {
+    const full = payloadFromForm();
+    const slim = {};
+    const missing = [];
+    for (const f of requiredFields) {
+      const v = full[f];
+      if (v === undefined || v === null || v === '') {
+        missing.push(f);
+      } else {
+        slim[f] = v;
+      }
+    }
+    if (missing.length) {
+      show('fail', 'Fill in <strong>' + missing.map(esc).join(', ') +
+        '</strong> before testing.');
       return;
     }
     disable(true);
     show('pending', 'Testing ' + esc(button.textContent) + '...');
-    const {resp, data} = await postJson(url, payload);
+    const {resp, data} = await postJson(url, slim);
     disable(false);
     if (resp && resp.ok && data.result === 'ok') {
       show('ok', '<strong>' + esc(button.textContent) + ' OK.</strong> ' + esc(data.detail));
@@ -715,10 +750,13 @@ _CONFIG_JS = r"""
     }
   }
   document.getElementById('test-bluewave').addEventListener('click', function() {
-    runTest(this, '/config/test/bluewave', 'blueweb_password', 'BlueWeb password');
+    runTest(this, '/config/test/bluewave',
+            ['blueweb_url', 'blueweb_user', 'blueweb_password']);
   });
   document.getElementById('test-mysql').addEventListener('click', function() {
-    runTest(this, '/config/test/mysql', 'mysql_password', 'MySQL password');
+    runTest(this, '/config/test/mysql',
+            ['mysql_host', 'mysql_port', 'mysql_database',
+             'mysql_user', 'mysql_password']);
   });
 })();
 """.strip()
