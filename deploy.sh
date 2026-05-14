@@ -282,6 +282,32 @@ rm -f "$hz_file"
 
 c_ok "/healthz responded (status=$status, HTTP $code)"
 
+# ---------- post-start sanity: WEB_PASS_HASH arrived intact ---------------
+#
+# bcrypt hashes contain `$` chars. Older compose files used
+# `environment: { WEB_PASS_HASH: "${WEB_PASS_HASH:?...}" }` which made
+# Compose interpolate the `$`s, corrupting the hash. We now use env_file:
+# which loads values verbatim. This check guarantees the hash matches.
+
+c_info "Verifying secrets arrived in the container intact..."
+container_hash=$(docker compose exec -T "$SERVICE_NAME" printenv WEB_PASS_HASH 2>/dev/null | tr -d '\r\n' || echo "")
+if [[ "$container_hash" != "$web_pass_hash" ]]; then
+    c_err "WEB_PASS_HASH in container does not match .env — auth WILL fail"
+    c_err "  expected length: ${#web_pass_hash} chars"
+    c_err "  actual length:   ${#container_hash} chars"
+    c_err "  Likely cause: docker-compose.yml is interpolating the hash."
+    c_err "  Make sure compose uses 'env_file: [.env]' (not 'environment:')."
+    exit 1
+fi
+c_ok "WEB_PASS_HASH verified intact (${#container_hash} chars)"
+
+container_keys=$(docker compose exec -T "$SERVICE_NAME" printenv CONFIG_ENC_KEYS 2>/dev/null | tr -d '\r\n' || echo "")
+if [[ "$container_keys" != "$config_enc_keys" ]]; then
+    c_err "CONFIG_ENC_KEYS in container does not match .env"
+    exit 1
+fi
+c_ok "CONFIG_ENC_KEYS verified intact"
+
 # ---------- next steps ----------------------------------------------------
 
 echo >&2

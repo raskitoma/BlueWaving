@@ -1,9 +1,15 @@
 # Local dev compose file for the BlueWeb audit ingest worker.
 # See BLUEWEB_AUDIT_INGEST_SPEC.md §4.4.
 #
-# Production deploys should replace `build: .` + `image:` with a
-# digest-pinned remote image:
+# Production deploys should replace `build: .` + the local `image:` tag with
+# a digest-pinned remote image:
 #   image: registry.local/bluewave-worker@sha256:<digest>
+#
+# Env vars come from `.env` via `env_file:`. We deliberately do NOT use the
+# `environment:` block with ${VAR} substitution — Compose interpolates `$`
+# inside substituted values, which corrupts bcrypt hashes (they contain `$`).
+# `env_file:` passes values to the container verbatim. The container itself
+# validates required vars at startup (see bluewave/web.py::validate_env).
 
 services:
   bluewave-worker:
@@ -12,21 +18,11 @@ services:
     container_name: bluewave-worker
     restart: unless-stopped
 
+    env_file:
+      - .env
+
     ports:
       - "8080:8080"
-
-    environment:
-      # Required per spec §4.5.
-      CONFIG_ENC_KEYS:  "${CONFIG_ENC_KEYS:?set in .env; generate via python -m bluewave.keygen}"
-      WEB_USER:         "${WEB_USER:?set in .env}"
-      WEB_PASS_HASH:    "${WEB_PASS_HASH:?set in .env; generate via python -m bluewave.hashpw}"
-      WEB_ALLOW_HTTP:   "${WEB_ALLOW_HTTP:?must be 1 (spec L13)}"
-
-      # Optional, with defaults.
-      TZ:                       "${TZ:-UTC}"
-      LOG_LEVEL:                "${LOG_LEVEL:-INFO}"
-      CATCH_UP_CAP_DAYS:        "${CATCH_UP_CAP_DAYS:-14}"
-      BACKFILL_SAFETY_CAP_DAYS: "${BACKFILL_SAFETY_CAP_DAYS:-365}"
 
     volumes:
       - bluewave-state:/var/lib/bluewave-worker
