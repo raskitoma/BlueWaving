@@ -16,6 +16,11 @@ from contextlib import contextmanager
 from typing import Iterator
 
 from selenium import webdriver
+from selenium.common.exceptions import (
+    ElementClickInterceptedException,
+    ElementNotInteractableException,
+    WebDriverException,
+)
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.remote.webelement import WebElement
 
@@ -122,9 +127,40 @@ class SafeDriver:
         return self.raw.find_element(sel.by, sel.value)
 
     def click(self, sel: Selector) -> None:
-        self.find(sel).click()
+        """Click ``sel``. If Selenium refuses (element-not-interactable or
+        click-intercepted — typically because the element is in the DOM but
+        ``display:none`` or covered), fall back to a JS click which fires
+        the synthetic event regardless of visibility."""
+        el = self.find(sel)
+        try:
+            el.click()
+        except (ElementNotInteractableException,
+                ElementClickInterceptedException):
+            # Document the fallback so log readers know what happened.
+            try:
+                self.raw.execute_script("arguments[0].click();", el)
+            except WebDriverException as js_err:
+                raise WebDriverException(
+                    f"standard click rejected and JS-click fallback also "
+                    f"failed for {sel.description}: {js_err}"
+                ) from js_err
 
     def type_into(self, sel: Selector, text: str) -> None:
+        """Set ``text`` into ``sel``. Standard `clear()` + `send_keys()` first;
+        falls back to a JS value-set with input/change events if Selenium
+        rejects the element as not-interactable (display:none, hidden, etc.)."""
         el = self.find(sel)
-        el.clear()
-        el.send_keys(text)
+        try:
+            el.clear()
+            el.send_keys(text)
+        except (ElementNotInteractableException,
+                ElementClickInterceptedException):
+            # JS fallback — set .value and fire input + change so any
+            # framework on-change handler fires too. Doesn't simulate
+            # individual key events, but the page reads .value at submit.
+            self.raw.execute_script(
+                "arguments[0].value = arguments[1];"
+                "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));"
+                "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));",
+                el, text,
+            )

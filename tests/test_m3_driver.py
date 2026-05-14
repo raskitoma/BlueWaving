@@ -126,6 +126,65 @@ def test_safe_driver_type_blocks_each_denylist_entry(denied_sel: Selector) -> No
     raw.find_element.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# SafeDriver.click — JS-click fallback for hidden / intercepted elements
+# ---------------------------------------------------------------------------
+
+
+def test_click_falls_back_to_js_when_not_interactable() -> None:
+    """If the standard click raises ElementNotInteractableException (e.g. the
+    element is display:none), SafeDriver falls back to a JS click."""
+    from selenium.common.exceptions import ElementNotInteractableException
+
+    raw = MagicMock()
+    el = MagicMock()
+    el.click.side_effect = ElementNotInteractableException("hidden")
+    raw.find_element.return_value = el
+    safe = SafeDriver(raw)
+
+    safe.click(_allowed_selector())  # must NOT raise
+
+    # JS click was invoked on the same element.
+    raw.execute_script.assert_called_once_with(
+        "arguments[0].click();", el,
+    )
+
+
+def test_click_falls_back_to_js_when_intercepted() -> None:
+    """ElementClickInterceptedException → JS fallback too."""
+    from selenium.common.exceptions import ElementClickInterceptedException
+
+    raw = MagicMock()
+    el = MagicMock()
+    el.click.side_effect = ElementClickInterceptedException("overlay")
+    raw.find_element.return_value = el
+    safe = SafeDriver(raw)
+
+    safe.click(_allowed_selector())
+
+    raw.execute_script.assert_called_once_with(
+        "arguments[0].click();", el,
+    )
+
+
+def test_click_propagates_when_both_strategies_fail() -> None:
+    """Regular click rejected AND JS-click fails → WebDriverException."""
+    from selenium.common.exceptions import (
+        ElementNotInteractableException,
+        WebDriverException,
+    )
+
+    raw = MagicMock()
+    el = MagicMock()
+    el.click.side_effect = ElementNotInteractableException("hidden")
+    raw.find_element.return_value = el
+    raw.execute_script.side_effect = WebDriverException("js error too")
+    safe = SafeDriver(raw)
+
+    with pytest.raises(WebDriverException):
+        safe.click(_allowed_selector())
+
+
 def test_safe_driver_type_into_clears_before_send_keys() -> None:
     el = MagicMock()
     raw = MagicMock()

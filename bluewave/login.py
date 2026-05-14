@@ -153,14 +153,34 @@ def login_and_navigate(
     except WebDriverException as e:
         raise NavFailed(f"could not reach {url}: {e}") from e
 
-    # S1.b — login form must render and accept credentials.
+    # S1.b — login form must be in the DOM. We use `presence_of_element_located`
+    # rather than `element_to_be_clickable` because some BlueWeb skins wrap the
+    # form in a panel whose CSS fails Selenium's visibility heuristics; the
+    # input is still typeable. SafeDriver.type_into has a JS fallback if
+    # send_keys is rejected.
     try:
         WebDriverWait(safe.raw, login_wait_s).until(
-            EC.element_to_be_clickable((LOGIN_USERNAME.by, LOGIN_USERNAME.value))
+            EC.presence_of_element_located(
+                (LOGIN_USERNAME.by, LOGIN_USERNAME.value)
+            )
         )
     except TimeoutException as e:
+        html_dump: str | None = None
+        try:
+            os.makedirs(DEFAULT_SCREENSHOT_DIR, exist_ok=True)
+            html_dump = os.path.join(
+                DEFAULT_SCREENSHOT_DIR,
+                f"{int(time.time())}_login_form_missing.html",
+            )
+        except OSError:
+            html_dump = None
+        try:
+            state = capture_page_state(safe.raw, save_html_to=html_dump)
+        except Exception:
+            state = {}
         raise NavFailed(
-            f"login form did not render within {login_wait_s}s"
+            f"login form (id={LOGIN_USERNAME.value!r}) did not appear in the "
+            f"DOM within {login_wait_s}s. " + _state_to_message(state)
         ) from e
 
     try:
@@ -216,21 +236,18 @@ def login_and_navigate(
             "Main menu not visible after submit. " + _state_to_message(state)
         ) from e
 
-    # S2.a — Reports must be clickable (it's present per S1.c, now wait
-    # for any JS-driven enabling to finish).
-    try:
-        WebDriverWait(safe.raw, nav_wait_s).until(
-            EC.element_to_be_clickable(
-                (MAIN_MENU_REPORTS.by, MAIN_MENU_REPORTS.value)
-            )
-        )
-    except TimeoutException as e:
-        raise NavFailed("Reports entry did not become clickable") from e
-
+    # S2.a — Click Reports. We deliberately do NOT gate on Selenium's
+    # `element_to_be_clickable` because BlueWeb's Quick Links bar is
+    # `display:none` on the main-menu page (the big icon row handles
+    # navigation there). Selenium would never see the element as
+    # "clickable", but SafeDriver.click falls back to a JS click which
+    # fires the synthetic event regardless of visibility.
     try:
         safe.click(MAIN_MENU_REPORTS)
     except NoSuchElementException as e:
-        raise NavFailed(f"Reports icon not found at click time: {e}") from e
+        raise NavFailed(f"Reports button not found at click time: {e}") from e
+    except WebDriverException as e:
+        raise NavFailed(f"could not click Reports button: {e}") from e
 
     # S2.b — Reports page rendered.
     try:

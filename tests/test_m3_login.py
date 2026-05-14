@@ -79,20 +79,32 @@ def test_wrong_credentials_raises_auth_failed() -> None:
 
 
 # ---------------------------------------------------------------------------
-# S2.a — Reports icon never appears
+# S2.a — Reports click rejected (covers JS-fallback failure paths)
 # ---------------------------------------------------------------------------
 
 
-def test_reports_icon_timeout_raises_nav_failed() -> None:
-    safe = _make_safe()
+def test_reports_click_webdriver_error_raises_nav_failed() -> None:
+    """If clicking the Reports button raises a non-recoverable
+    WebDriverException (i.e. not the kind SafeDriver retries via JS), the
+    orchestrator surfaces ``nav_failed``."""
+    from bluewave.selectors import MAIN_MENU_REPORTS
+
+    raw = MagicMock()
+
+    def _find(by, value):
+        el = MagicMock()
+        if value == MAIN_MENU_REPORTS.value:
+            # WebDriverException is the *parent* class — SafeDriver.click only
+            # retries the two specific intercept subclasses, so this propagates.
+            el.click.side_effect = WebDriverException("page broken")
+        return el
+
+    raw.find_element.side_effect = _find
+    safe = SafeDriver(raw)
 
     with patch.object(login, "WebDriverWait") as wait_cls:
-        # form OK, welcome OK, reports icon timeout
-        wait_cls.return_value.until.side_effect = [
-            object(),
-            object(),
-            TimeoutException("no reports icon"),
-        ]
+        # form OK, main-menu presence OK (S1.b + S1.c both pass).
+        wait_cls.return_value.until.return_value = object()
         with pytest.raises(NavFailed) as excinfo:
             login.login_and_navigate(safe, "http://b/", "u", "p")
 
@@ -105,12 +117,12 @@ def test_reports_icon_timeout_raises_nav_failed() -> None:
 
 
 def test_reports_page_marker_missing_raises_nav_failed() -> None:
+    """Third wait (Choose Report: marker) times out → NavFailed."""
     safe = _make_safe()
 
     with patch.object(login, "WebDriverWait") as wait_cls:
-        # form OK, welcome OK, reports icon OK, marker timeout
+        # form OK, main-menu presence OK, marker timeout (3 waits total).
         wait_cls.return_value.until.side_effect = [
-            object(),
             object(),
             object(),
             TimeoutException("marker missing"),
