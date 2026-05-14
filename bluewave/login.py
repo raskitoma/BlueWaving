@@ -13,6 +13,7 @@ Exit codes match the spec §10/M3 pass criteria:
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import time
@@ -43,6 +44,8 @@ NAV_WAIT_S = 15  # tighter for nav transitions that should be near-instant
 REPORTS_PAGE_MARKER = "Choose Report:"
 
 DEFAULT_SCREENSHOT_DIR = "/var/lib/bluewave-worker/screenshots"
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -139,12 +142,15 @@ def login_and_navigate(
     Step boundaries:
 
     * S1.a — GET ``url`` (transport reachability)
-    * S1.b — wait for login form, fill, submit
-    * S1.c — wait for the main menu (Reports entry) — this is our
-      authentication signal: if we can see Reports, we are logged in.
-      The login form's *absence* is the implicit second confirmation
-      because Reports does not appear on the login page.
-    * S2.a — click Reports (already located by the S1.c wait)
+    * S1.fast — if the main menu is *already* visible (existing session,
+      SSO, network auth, cached creds, anything), skip the login form
+      entirely and jump straight to S2. Robust against scenarios where
+      something else already authenticated this Chromium.
+    * S1.b — (only if S1.fast did not trigger) wait for login form, fill, submit
+    * S1.c — (only if S1.fast did not trigger) wait for the main menu —
+      this is our authentication signal: if we can see Reports, we are
+      logged in.
+    * S2.a — click Reports
     * S2.b — wait for "Choose Report:" caption on the Reports page
     """
     # S1.a — transport reachability.
@@ -153,6 +159,58 @@ def login_and_navigate(
     except WebDriverException as e:
         raise NavFailed(f"could not reach {url}: {e}") from e
 
+    # S1.fast — fast-path: if the page we landed on ALREADY contains the
+    # Reports menu element, we're authenticated (existing session / SSO /
+    # whatever) and there's nothing to submit. Skip directly to S2.
+    # find_elements (plural) returns [] when nothing matches — never raises.
+    try:
+        already_authed = bool(
+            safe.raw.find_elements(MAIN_MENU_REPORTS.by, MAIN_MENU_REPORTS.value)
+        )
+    except WebDriverException:
+        already_authed = False
+
+    if already_authed:
+        log.info("login_and_navigate: existing session detected, skipping login form")
+    else:
+        _do_login_form_flow(safe, user, password, login_wait_s=login_wait_s)
+
+    # S2.a — Click Reports. We deliberately do NOT gate on Selenium's
+    # `element_to_be_clickable` because BlueWeb's Quick Links bar is
+    # `display:none` on the main-menu page (the big icon row handles
+    # navigation there). Selenium would never see the element as
+    # "clickable", but SafeDriver.click falls back to a JS click which
+    # fires the synthetic event regardless of visibility.
+    try:
+        safe.click(MAIN_MENU_REPORTS)
+    except NoSuchElementException as e:
+        raise NavFailed(f"Reports button not found at click time: {e}") from e
+    except WebDriverException as e:
+        raise NavFailed(f"could not click Reports button: {e}") from e
+
+    # S2.b — Reports page rendered.
+    try:
+        WebDriverWait(safe.raw, nav_wait_s).until(
+            lambda d: REPORTS_PAGE_MARKER in (d.page_source or "")
+        )
+    except TimeoutException as e:
+        raise NavFailed(
+            f"'{REPORTS_PAGE_MARKER}' not present on Reports page within {nav_wait_s}s"
+        ) from e
+
+
+def _do_login_form_flow(
+    safe: SafeDriver,
+    user: str,
+    password: str,
+    *,
+    login_wait_s: int,
+) -> None:
+    """S1.b + S1.c — fill the login form and verify the main menu appears.
+
+    Skipped entirely when :func:`login_and_navigate` detects an existing
+    session (fast-path).
+    """
     # S1.b — login form must be in the DOM. We use `presence_of_element_located`
     # rather than `element_to_be_clickable` because some BlueWeb skins wrap the
     # form in a panel whose CSS fails Selenium's visibility heuristics; the
@@ -205,9 +263,6 @@ def login_and_navigate(
             ) from e
 
     # S1.c — main menu visible (Reports entry) means we are authenticated.
-    # We deliberately do NOT match a "Welcome …" banner: that text drifts
-    # by theme / localization. The presence of the Reports entry is both
-    # an unambiguous success signal and the destination for S2.
     try:
         WebDriverWait(safe.raw, login_wait_s).until(
             EC.presence_of_element_located(
@@ -215,10 +270,7 @@ def login_and_navigate(
             )
         )
     except TimeoutException as e:
-        # Capture page state for diagnostics. If we can write to the
-        # screenshots dir, also dump full page source so the operator can
-        # inspect the actual HTML and tune selectors.
-        html_dump: str | None = None
+        html_dump = None
         try:
             os.makedirs(DEFAULT_SCREENSHOT_DIR, exist_ok=True)
             html_dump = os.path.join(
@@ -226,37 +278,12 @@ def login_and_navigate(
             )
         except OSError:
             html_dump = None
-
         try:
             state = capture_page_state(safe.raw, save_html_to=html_dump)
         except Exception:
             state = {}
-
         raise AuthFailed(
             "Main menu not visible after submit. " + _state_to_message(state)
-        ) from e
-
-    # S2.a — Click Reports. We deliberately do NOT gate on Selenium's
-    # `element_to_be_clickable` because BlueWeb's Quick Links bar is
-    # `display:none` on the main-menu page (the big icon row handles
-    # navigation there). Selenium would never see the element as
-    # "clickable", but SafeDriver.click falls back to a JS click which
-    # fires the synthetic event regardless of visibility.
-    try:
-        safe.click(MAIN_MENU_REPORTS)
-    except NoSuchElementException as e:
-        raise NavFailed(f"Reports button not found at click time: {e}") from e
-    except WebDriverException as e:
-        raise NavFailed(f"could not click Reports button: {e}") from e
-
-    # S2.b — Reports page rendered.
-    try:
-        WebDriverWait(safe.raw, nav_wait_s).until(
-            lambda d: REPORTS_PAGE_MARKER in (d.page_source or "")
-        )
-    except TimeoutException as e:
-        raise NavFailed(
-            f"'{REPORTS_PAGE_MARKER}' not present on Reports page within {nav_wait_s}s"
         ) from e
 
 

@@ -11,7 +11,10 @@ Two surfaces:
 """
 from __future__ import annotations
 
+import logging
 import os
+import shutil
+import tempfile
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -26,6 +29,9 @@ from selenium.webdriver.remote.webelement import WebElement
 
 from .exceptions import DenylistedSelector
 from .selectors import DENYLIST, Selector
+
+
+log = logging.getLogger(__name__)
 
 
 DEFAULT_DOWNLOAD_DIR = "/tmp/bluewave-dl"
@@ -77,11 +83,22 @@ def build_driver(
 ) -> Iterator[webdriver.Chrome]:
     """Spin up a fresh Chromium and yield it. Quits in ``finally`` (spec §6.3).
 
+    Each call gets its own ``--user-data-dir`` created via
+    ``tempfile.mkdtemp`` so cookies and session state do NOT leak between
+    runs. Without this, the long-running uvicorn worker's PID would yield
+    the same profile dir across every Chromium spawn, and a successful
+    login from one probe would keep the next probe authenticated — which
+    means the login form never re-renders and the next run looks broken.
+
     Also issues DevTools ``Page.setDownloadBehavior`` as a belt-and-suspenders
     fallback for older Chromium versions that ignore the prefs in headless
     mode (spec §6.1).
     """
-    opts = build_chrome_options(download_dir=download_dir)
+    user_data_dir = tempfile.mkdtemp(prefix="cr-profile-")
+    opts = build_chrome_options(
+        download_dir=download_dir,
+        user_data_dir=user_data_dir,
+    )
     drv = webdriver.Chrome(options=opts)
     try:
         try:
@@ -100,6 +117,13 @@ def build_driver(
         except Exception:
             # Already exited / crashed — nothing more we can do here.
             pass
+        # Always remove the ephemeral profile dir, even if quit() raised.
+        # This is what keeps cookies / login state from bleeding into the
+        # NEXT driver spawn within the same worker process.
+        try:
+            shutil.rmtree(user_data_dir, ignore_errors=True)
+        except Exception:
+            log.warning("could not remove user-data-dir %s", user_data_dir)
 
 
 class SafeDriver:

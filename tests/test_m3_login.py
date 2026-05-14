@@ -21,7 +21,13 @@ from bluewave.exceptions import AuthFailed, NavFailed
 
 
 def _make_safe(raw: MagicMock | None = None) -> SafeDriver:
-    return SafeDriver(raw or MagicMock())
+    # Default: the fast-path "already authenticated" check finds nothing,
+    # so the login flow runs normally. Tests that want the fast-path can
+    # override `raw.find_elements.return_value` AFTER this call.
+    if raw is None:
+        raw = MagicMock()
+    raw.find_elements.return_value = []
+    return SafeDriver(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +137,35 @@ def test_reports_page_marker_missing_raises_nav_failed() -> None:
             login.login_and_navigate(safe, "http://b/", "u", "p")
 
     assert excinfo.value.status == "nav_failed"
+
+
+# ---------------------------------------------------------------------------
+# Fast-path — existing session detected, login form skipped
+# ---------------------------------------------------------------------------
+
+
+def test_fast_path_skips_login_when_main_menu_already_present() -> None:
+    """If `find_elements(MAIN_MENU_REPORTS)` returns a non-empty list right
+    after `driver.get(url)`, the login form is never accessed."""
+    raw = MagicMock()
+    el = MagicMock()
+    raw.find_element.return_value = el
+    safe = _make_safe(raw)
+    # Simulate already-authenticated state — override AFTER _make_safe.
+    raw.find_elements.return_value = [MagicMock()]
+
+    with patch.object(login, "WebDriverWait") as wait_cls:
+        wait_cls.return_value.until.return_value = object()
+        login.login_and_navigate(safe, "http://b/", "u", "p")
+
+    # The username/password inputs were never typed into; only the Reports
+    # button got clicked.
+    assert el.send_keys.call_count == 0, \
+        "should NOT have typed credentials on fast-path"
+
+    # Only ONE WebDriverWait should have run: S2.b (Choose Report: marker).
+    # S1.b and S1.c are inside _do_login_form_flow which was skipped.
+    assert wait_cls.return_value.until.call_count == 1
 
 
 # ---------------------------------------------------------------------------
