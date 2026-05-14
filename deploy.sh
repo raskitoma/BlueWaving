@@ -17,7 +17,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-ENV_FILE=".env"
+# NOTE: we deliberately do NOT use `.env`. Docker Compose auto-loads any
+# file literally named `.env` and interpolates `$` inside its values,
+# which corrupts bcrypt hashes (they contain `$`). `worker.env` is loaded
+# via env_file with `format: raw` (see docker-compose.yml).
+ENV_FILE="worker.env"
+LEGACY_ENV_FILE=".env"
+
 IMAGE_TAG="bluewave-worker:dev"
 SERVICE_NAME="bluewave-worker"
 WORKER_URL="${WORKER_URL:-http://localhost:8080}"
@@ -52,9 +58,23 @@ c_ok "image $IMAGE_TAG built"
 # ---------- step 3: read existing .env (if any) ---------------------------
 
 c_step "Step 3/5 — Configure environment"
-declare -A existing
+
+# Decide which file to read existing values from. Prefer the new
+# `worker.env`; fall back to a legacy `.env` from a previous deploy.
+read_from=""
 if [[ -f "$ENV_FILE" ]]; then
+    read_from="$ENV_FILE"
     c_info "Found existing $ENV_FILE — will offer to reuse each value"
+elif [[ -f "$LEGACY_ENV_FILE" ]]; then
+    read_from="$LEGACY_ENV_FILE"
+    c_warn "Found legacy $LEGACY_ENV_FILE — will migrate to $ENV_FILE"
+    c_warn "  (Compose auto-loads .env and interpolates \$ — corrupts bcrypt hashes)"
+else
+    c_info "No existing $ENV_FILE — will generate fresh values"
+fi
+
+declare -A existing
+if [[ -n "$read_from" ]]; then
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ -z "${line// }" ]] && continue
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
@@ -62,9 +82,7 @@ if [[ -f "$ENV_FILE" ]]; then
         val="${line#*=}"
         key="${key// }"
         existing["$key"]="$val"
-    done < "$ENV_FILE"
-else
-    c_info "No existing $ENV_FILE — will generate fresh values"
+    done < "$read_from"
 fi
 
 # ---------- prompt helpers -------------------------------------------------
@@ -244,6 +262,14 @@ BACKFILL_SAFETY_CAP_DAYS=$backfill_cap
 EOF
 chmod 600 "$ENV_FILE"
 c_ok "$ENV_FILE written (mode 600)"
+
+# Migrate-away from legacy `.env` so Compose stops auto-loading it.
+if [[ -f "$LEGACY_ENV_FILE" ]]; then
+    legacy_backup="${LEGACY_ENV_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
+    mv "$LEGACY_ENV_FILE" "$legacy_backup"
+    chmod 600 "$legacy_backup"
+    c_warn "Renamed $LEGACY_ENV_FILE → $legacy_backup so Compose stops auto-loading it"
+fi
 
 # ---------- step 5: compose up + healthz wait -----------------------------
 

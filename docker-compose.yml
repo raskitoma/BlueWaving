@@ -1,15 +1,16 @@
 # Local dev compose file for the BlueWeb audit ingest worker.
 # See BLUEWEB_AUDIT_INGEST_SPEC.md §4.4.
 #
-# Production deploys should replace `build: .` + the local `image:` tag with
-# a digest-pinned remote image:
-#   image: registry.local/bluewave-worker@sha256:<digest>
+# IMPORTANT: env values live in `worker.env`, NOT `.env`.
+# Reason: Compose AUTO-LOADS any file literally named `.env` from the
+# project root and performs variable interpolation on its values. bcrypt
+# hashes contain `$` characters, which Compose treats as variable
+# references, corrupting the hash before it ever reaches the container.
+# Using a non-default filename + `format: raw` makes the load verbatim.
 #
-# Env vars come from `.env` via `env_file:`. We deliberately do NOT use the
-# `environment:` block with ${VAR} substitution — Compose interpolates `$`
-# inside substituted values, which corrupts bcrypt hashes (they contain `$`).
-# `env_file:` passes values to the container verbatim. The container itself
-# validates required vars at startup (see bluewave/web.py::validate_env).
+# Production deploys: replace `build: .` + `image:` with a digest-pinned
+# remote image:
+#   image: registry.local/bluewave-worker@sha256:<digest>
 
 services:
   bluewave-worker:
@@ -19,7 +20,9 @@ services:
     restart: unless-stopped
 
     env_file:
-      - .env
+      - path: worker.env
+        required: true
+        format: raw
 
     ports:
       - "8080:8080"

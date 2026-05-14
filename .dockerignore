@@ -2,6 +2,9 @@
 .gitignore
 .env
 .env.local
+.env.bak.*
+worker.env
+worker.env.bak.*
 .venv
 venv
 __pycache__

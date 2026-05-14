@@ -27,7 +27,7 @@ The wizard walks five steps:
    6. `LOG_LEVEL` — `DEBUG`/`INFO`/`WARNING`/`ERROR`
    7. `CATCH_UP_CAP_DAYS` — max boot-time catch-up window
    8. `BACKFILL_SAFETY_CAP_DAYS` — max age for a manual backfill
-4. **Write `.env`** — mode 600; existing file backed up with a timestamp suffix
+4. **Write `worker.env`** — mode 600; existing file backed up with a timestamp suffix. (Not `.env` — Compose auto-interpolates `.env` and corrupts bcrypt hashes.)
 5. **Start** — `docker compose up -d`, poll `/healthz` for up to 60 s
 
 **Re-running is safe.** Each prompt shows the existing value (passwords as

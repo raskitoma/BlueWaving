@@ -5,6 +5,9 @@ __pycache__/
 venv/
 .env
 .env.local
+.env.bak.*
+worker.env
+worker.env.bak.*
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
