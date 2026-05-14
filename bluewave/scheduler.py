@@ -38,7 +38,8 @@ class Scheduler:
 
     def start(self) -> None:
         """Start APScheduler in the background. Registers the daily job if
-        a config is present. Also runs the boot-time catch-up."""
+        a config is present, runs the boot-time catch-up, and bootstraps
+        the audit table (idempotent — `CREATE TABLE IF NOT EXISTS`)."""
         self._sched = BackgroundScheduler(timezone="UTC")
         self._sched.start()
 
@@ -47,6 +48,7 @@ class Scheduler:
             log.info("scheduler.start unconfigured — no daily job registered")
             return
 
+        self._bootstrap_audit_table(cfg)
         self._register_daily(cfg)
         self._boot_catchup(cfg)
 
@@ -113,6 +115,31 @@ class Scheduler:
             cfg.schedule_local,
             cfg.operator_timezone,
         )
+
+    def _bootstrap_audit_table(self, cfg) -> None:
+        """Idempotent: CREATE TABLE IF NOT EXISTS + schema validation.
+        Logged and tolerated — /healthz surfaces persistent schema_drift."""
+        try:
+            from .db import MysqlConfig, connect
+            from .schema import bootstrap_and_validate
+
+            mysql_cfg = MysqlConfig(
+                host=cfg.mysql_host, port=cfg.mysql_port, user=cfg.mysql_user,
+                password=cfg.mysql_password, database=cfg.mysql_database,
+            )
+            with connect(mysql_cfg) as conn:
+                result = bootstrap_and_validate(
+                    conn, database=cfg.mysql_database,
+                )
+            if result.ok:
+                log.info("scheduler.bootstrap_audit_table ok")
+            else:
+                log.warning(
+                    "scheduler.bootstrap_audit_table failed kind=%s msg=%s",
+                    result.error_kind, result.error_message,
+                )
+        except Exception:
+            log.exception("scheduler.bootstrap_audit_table raised")
 
     def _boot_catchup(self, cfg) -> None:
         try:

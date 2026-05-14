@@ -35,6 +35,7 @@ from .auth import (
 )
 from .config import Config
 from .probes import probe_bluewave_login, probe_mysql, triple_probe
+from .schema import bootstrap_and_validate
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +69,27 @@ def _next_run_utc(cfg: Config) -> Optional[datetime]:
     if candidate <= now_local:
         candidate = candidate + timedelta(days=1)
     return candidate.astimezone(timezone.utc)
+
+
+def _format_eta(when_utc: Optional[datetime]) -> Optional[str]:
+    """Human-readable 'in 6h 23m' relative to now()."""
+    if when_utc is None:
+        return None
+    delta = when_utc - datetime.now(timezone.utc)
+    secs = int(delta.total_seconds())
+    if secs <= 0:
+        return "overdue"
+    days = secs // 86400
+    hours = (secs % 86400) // 3600
+    minutes = (secs % 3600) // 60
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes or not parts:
+        parts.append(f"{minutes}m")
+    return "in " + " ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +305,12 @@ def register_routes(app: FastAPI) -> None:
             })
 
         store.save(new_cfg)
+
+        # Now that we have validated MySQL access and persisted the config,
+        # bootstrap the audit table itself. `CREATE TABLE IF NOT EXISTS`
+        # is idempotent — safe whether this is first-save or a re-save.
+        schema_report = _bootstrap_audit_table(new_cfg)
+
         # Reschedule the daily cron now that the schedule / timezone may
         # have changed (spec §10/M7 + §10/M8 pass criteria).
         scheduler = getattr(app.state, "scheduler", None)
@@ -292,7 +320,7 @@ def register_routes(app: FastAPI) -> None:
             except Exception:  # pragma: no cover - defensive
                 pass
         return JSONResponse(status_code=200, content={
-            "saved": True, "probes": report,
+            "saved": True, "probes": report, "schema": schema_report,
         })
 
     # =====================================================================
@@ -379,6 +407,45 @@ def register_routes(app: FastAPI) -> None:
                 "queue_depth": result.queue_depth,
             },
         )
+
+    # =====================================================================
+    # /run/dry — preview the pipeline without inserting (spec L24 / Tier 2)
+    # =====================================================================
+
+    @app.post("/run/dry")
+    async def post_dry_run(
+        body: RunRequest,
+        _: str = Depends(require_basic_auth),
+        __: None = Depends(require_csrf),
+    ) -> JSONResponse:
+        import asyncio
+        from .dryrun import dry_run
+
+        store = _store(app)
+        cfg = store.load()
+        if cfg is None:
+            raise HTTPException(409, "unconfigured")
+
+        today = _today_local(cfg)
+        if body.report_date is None:
+            report_date = today - timedelta(days=1)
+        else:
+            try:
+                report_date = datetime.strptime(body.report_date, "%Y-%m-%d").date()
+            except ValueError:
+                raise HTTPException(400, "report_date must be YYYY-MM-DD")
+
+        if report_date >= today:
+            raise HTTPException(
+                400,
+                f"report_date {report_date} is today or future; "
+                "dry-run only supports past dates",
+            )
+
+        # Selenium is blocking (~30–60 s). Run in a thread pool so the
+        # event loop stays responsive for other requests.
+        result = await asyncio.to_thread(dry_run, store, report_date)
+        return JSONResponse(content=result.to_dict())
 
     # =====================================================================
     # /run/catchup — enqueue every missing day
@@ -505,6 +572,7 @@ def register_routes(app: FastAPI) -> None:
             _render_dashboard_html(
                 cfg, _orch(app).state(),
                 recent_runs=recent_runs, csrf_token=token,
+                next_run_at_utc=_next_run_utc(cfg),
             )
         )
 
@@ -586,6 +654,20 @@ table.runs a:hover { text-decoration: underline; }
           justify-content: space-between; }
 code { background: #f3f4f6; padding: 0.1rem 0.35rem; border-radius: 3px;
        font-size: 0.88em; }
+/* Inside the dark header, override so values are legible. */
+header code { background: rgba(255,255,255,0.18); color: #fff;
+              border: 1px solid rgba(255,255,255,0.28); }
+header a { color: #fff; }
+header a:hover { text-decoration: underline; }
+/* details/summary for collapsible preview tables. */
+details { margin-top: 1rem; }
+details summary { cursor: pointer; font-weight: 600; padding: 0.4rem 0;
+                  color: #1e3a8a; }
+details[open] summary { margin-bottom: 0.5rem; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 0.4rem 1rem;
+      margin: 0.5rem 0 0; }
+.kv dt { font-weight: 600; color: #374151; }
+.kv dd { margin: 0; font-family: ui-monospace, monospace; }
 """.strip()
 
 
@@ -708,8 +790,30 @@ _CONFIG_JS = r"""
     if (!resp) { show('fail', '<strong>Network error.</strong>'); return; }
     if (resp.ok && data.saved) {
       clearDraft();  // server now has the canonical values
-      show('ok', '<strong>Saved.</strong>' + probes(data.probes) +
-        ' <a href="/">&larr; Back to dashboard</a>');
+      let html = '<strong>Saved.</strong>' + probes(data.probes);
+      if (data.schema) {
+        if (data.schema.ok) {
+          html +=
+            '<p>✓ Audit table <code>z_audit_logs_efk</code> is ready ' +
+            '(created or already exists with the expected shape).</p>';
+        } else {
+          html +=
+            '<p>⚠ <strong>Audit table not ready</strong> — kind=<code>' +
+            esc(data.schema.kind) + '</code>: ' +
+            esc(data.schema.message || '') + '</p>';
+          if (data.schema.diffs && data.schema.diffs.length) {
+            html += '<ul>' +
+              data.schema.diffs.map(d => '<li>' + esc(d) + '</li>').join('') +
+              '</ul>';
+          }
+          html +=
+            '<p class="muted">Config is saved, but runs will fail until ' +
+            'this is resolved. Common fix: grant the MySQL user CREATE on ' +
+            'the audit database, or reconcile schema drift.</p>';
+        }
+      }
+      html += ' <a href="/">&larr; Back to dashboard</a>';
+      show('ok', html);
     } else if (data.probes) {
       show('fail', '<strong>Not saved — a probe failed:</strong>' + probes(data.probes) +
         '<p class="muted">Your entries are kept locally. Fix the failing probe and try again.</p>');
@@ -801,6 +905,70 @@ _DASHBOARD_JS = r"""
     }
   });
 
+  const dryRun = document.getElementById('dry-run');
+  if (dryRun) dryRun.addEventListener('click', async () => {
+    show('pending',
+      'Dry-run: logging in, downloading CSV, transforming rows (no DB write)…<br>' +
+      '<span class="muted">This takes ~30–60 seconds.</span>');
+    const {resp, data} = await postJson('/run/dry', {report_date: null});
+    if (!resp || !resp.ok) {
+      show('fail', '<strong>Refused.</strong> ' +
+        esc((data && data.detail) || JSON.stringify(data)));
+      return;
+    }
+    if (data.status === 'empty') {
+      show('ok',
+        '<strong>Report is empty</strong> for ' + esc(data.report_date) + '. ' +
+        'A scheduled run for this date would record <code>status=ok</code>, ' +
+        '<code>rows_in_csv=0</code>.');
+      return;
+    }
+    if (data.status !== 'ok') {
+      show('fail', '<strong>Dry-run failed.</strong> ' + esc(data.error || ''));
+      return;
+    }
+
+    // Stats summary + collapsible preview tables.
+    let html = '<strong>Dry-run preview &mdash; ' + esc(data.report_date) +
+      '</strong> (nothing was written)';
+    html +=
+      '<dl class="kv">' +
+      '<dt>CSV rows</dt><dd>' + esc(data.csv_rows_total) + '</dd>' +
+      '<dt>Transformed</dt><dd>' + esc(data.transformed_rows_total) + '</dd>' +
+      '<dt>Would insert</dt><dd><strong>' + esc(data.would_insert) +
+        '</strong></dd>' +
+      '<dt>Would skip (already in DB)</dt><dd>' +
+        esc(data.would_skip_duplicate) + '</dd>' +
+      '</dl>';
+
+    if (data.csv_preview && data.csv_preview.length) {
+      html += '<details><summary>CSV preview &mdash; first ' +
+        data.csv_preview.length + ' rows</summary>' +
+        renderPreviewTable(data.csv_preview) + '</details>';
+    }
+    if (data.transformed_preview && data.transformed_preview.length) {
+      html += '<details open><summary>Transformed preview &mdash; first ' +
+        data.transformed_preview.length +
+        ' rows (these are what would be INSERTed)</summary>' +
+        renderPreviewTable(data.transformed_preview) + '</details>';
+    }
+    show('ok', html);
+  });
+
+  function renderPreviewTable(rows) {
+    if (!rows || !rows.length) return '';
+    const keys = Object.keys(rows[0]);
+    let h = '<table class="runs"><thead><tr>';
+    for (const k of keys) h += '<th>' + esc(k) + '</th>';
+    h += '</tr></thead><tbody>';
+    for (const r of rows) {
+      h += '<tr>';
+      for (const k of keys) h += '<td>' + esc(r[k]) + '</td>';
+      h += '</tr>';
+    }
+    return h + '</tbody></table>';
+  }
+
   const catchup = document.getElementById('catchup');
   if (catchup) catchup.addEventListener('click', async () => {
     show('pending', 'Computing missing days...');
@@ -843,6 +1011,7 @@ def _render_dashboard_html(
     recent_runs: list[dict] | None = None,
     csrf_token: str = "",
     healthz_status: str = "",
+    next_run_at_utc: Optional[datetime] = None,
 ) -> str:
     if cfg is None:
         body = (
@@ -862,6 +1031,23 @@ def _render_dashboard_html(
     status_pill = ""
     if healthz_status:
         status_pill = f" &middot; status <code>{_esc(healthz_status)}</code>"
+
+    # Next-run line: "<UTC> (in 6h 23m)" — empty if no schedule yet.
+    if next_run_at_utc is not None:
+        next_utc_str = next_run_at_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+        eta = _format_eta(next_run_at_utc) or ""
+        try:
+            next_local = next_run_at_utc.astimezone(
+                ZoneInfo(cfg.operator_timezone)
+            ).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            next_local = ""
+        next_run_html = (
+            f"<br>next run <code>{_esc(next_utc_str)} ({_esc(eta)})</code>"
+            + (f" &middot; local <code>{_esc(next_local)}</code>" if next_local else "")
+        )
+    else:
+        next_run_html = ""
 
     head_extra = f"<meta name='csrf-token' content='{_esc(csrf_token)}'>"
 
@@ -902,7 +1088,7 @@ def _render_dashboard_html(
  TZ <code>{_esc(cfg.operator_timezone)}</code> &middot;
  schedule <code>{_esc(cfg.schedule_local)} local</code> &middot;
  queue <code>{queue_depth}</code> &middot;
- in flight {in_flight_html}{status_pill}</div>
+ in flight {in_flight_html}{status_pill}{next_run_html}</div>
 </header>
 <main>
 <nav>
@@ -913,8 +1099,13 @@ def _render_dashboard_html(
 <h2>Actions</h2>
 <div class='button-row'>
 <button id='run-now' class='primary' type='button'>Run now (yesterday)</button>
+<button id='dry-run' class='secondary' type='button'>Dry-run preview (yesterday)</button>
 <button id='catchup' class='secondary' type='button'>Catch up missing</button>
 </div>
+<p class='muted' style='margin-top:0.4rem;'>
+Dry-run logs in, downloads the CSV, transforms rows, and shows how many would be
+inserted vs. duplicates — without writing anything to the DB.
+</p>
 <div id='status' class='status'></div>
 
 <h2>Recent runs</h2>
@@ -1075,6 +1266,50 @@ def _render_runs_html(cfg: Config, rows: list[dict], limit: int, offset: int) ->
 # ---------------------------------------------------------------------------
 # Helpers exposed for testability
 # ---------------------------------------------------------------------------
+
+
+def _bootstrap_audit_table(cfg: Config) -> dict:
+    """Create + validate ``z_audit_logs_efk`` against the configured MySQL.
+
+    Returns a JSON-friendly dict describing the outcome. Never raises —
+    save-time bootstrap failure becomes a warning on the form, not a 500.
+    """
+    from .db import MysqlConfig, connect as mysql_connect
+
+    mysql_cfg = MysqlConfig(
+        host=cfg.mysql_host, port=cfg.mysql_port, user=cfg.mysql_user,
+        password=cfg.mysql_password, database=cfg.mysql_database,
+    )
+    try:
+        with mysql_connect(mysql_cfg) as conn:
+            result = bootstrap_and_validate(conn, database=cfg.mysql_database)
+    except Exception as e:  # pragma: no cover - defensive
+        return {
+            "ok": False,
+            "kind": "connection_error",
+            "message": f"could not connect to MySQL: {type(e).__name__}: {e}",
+            "diffs": [],
+        }
+
+    diffs: list[str] = []
+    if result.schema_check is not None:
+        diffs = list(result.schema_check.diffs)
+
+    if result.ok:
+        return {
+            "ok": True,
+            "kind": "ready",
+            "message": "audit table z_audit_logs_efk is ready",
+            "diffs": [],
+        }
+    return {
+        "ok": False,
+        "kind": result.error_kind or "unknown",
+        "message": result.error_message or (
+            "; ".join(diffs) if diffs else "schema bootstrap failed"
+        ),
+        "diffs": diffs,
+    }
 
 
 def _payload_to_cfg(p: ConfigPayload) -> Config:
